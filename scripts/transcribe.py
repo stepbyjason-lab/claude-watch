@@ -41,14 +41,54 @@ def parse_vtt(text: str) -> list[dict]:
     return cues
 
 
+_ROLLING_OVERLAP_MIN = 10  # chars of suffix/prefix overlap to count as a rolling caption
+
+
 def dedupe_cues(cues: list[dict]) -> list[dict]:
-    """Collapse adjacent cues with identical text into one (extending t_end)."""
+    """Collapse adjacent rolling/duplicate cues from VTT (especially YouTube auto-caps).
+
+    Handles four patterns:
+    1. Identical text → extend prev's t_end.
+    2. `c.text` starts with `prev.text` (rolling extension) → replace prev's text with c's longer text.
+    3. `prev.text` ends with `c.text` (c is a tail already shown) → extend prev's t_end, drop c.
+    4. Suffix of prev matches prefix of c (>= 10 chars) → emit only the new tail of c.
+    Otherwise keep both as separate cues.
+    """
     out: list[dict] = []
     for c in cues:
-        if out and out[-1]["text"] == c["text"]:
-            out[-1] = dict(out[-1], t_end=max(out[-1]["t_end"], c["t_end"]))
-        else:
+        if not out:
             out.append(dict(c))
+            continue
+        prev = out[-1]
+        # 1. Identical
+        if prev["text"] == c["text"]:
+            prev["t_end"] = max(prev["t_end"], c["t_end"])
+            continue
+        # 2. Rolling extension: c is the longer continuation of prev
+        if len(c["text"]) > len(prev["text"]) and c["text"].startswith(prev["text"]):
+            prev["t_end"] = c["t_end"]
+            prev["text"] = c["text"]
+            continue
+        # 3. c is already contained at the tail of prev
+        if prev["text"].endswith(c["text"]):
+            prev["t_end"] = max(prev["t_end"], c["t_end"])
+            continue
+        # 4. Suffix of prev = prefix of c → emit only the new tail
+        max_check = min(len(prev["text"]), len(c["text"]))
+        overlap = 0
+        for k in range(max_check, _ROLLING_OVERLAP_MIN - 1, -1):
+            if prev["text"][-k:] == c["text"][:k]:
+                overlap = k
+                break
+        if overlap > 0:
+            tail = c["text"][overlap:].lstrip()
+            if tail:
+                out.append({"t_start": c["t_start"], "t_end": c["t_end"], "text": tail})
+            else:
+                prev["t_end"] = max(prev["t_end"], c["t_end"])
+            continue
+        # 5. Unrelated → keep both
+        out.append(dict(c))
     return out
 
 
