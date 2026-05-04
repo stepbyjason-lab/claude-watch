@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build dist/watch.skill — a zip of SKILL.md + scripts/ for claude.ai upload.
+# Build dist/claude-watch.skill — a zip of SKILL.md + scripts/ for claude.ai upload.
 # Strips Claude-Code-only and Codex-only directories.
 set -euo pipefail
 
@@ -8,7 +8,7 @@ cd "$ROOT"
 
 DIST="$ROOT/dist"
 STAGE="$DIST/_stage"
-OUT="$DIST/watch.skill"
+OUT="$DIST/claude-watch.skill"
 
 rm -rf "$DIST"
 mkdir -p "$STAGE"

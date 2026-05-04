@@ -3,16 +3,16 @@
 **Turn any tutorial or lecture video into structured study notes.** Paste a URL, walk away, come back to a markdown file with embedded screenshots, timestamped transcript, and Claude's synthesis — saved to a persistent library.
 
 ```
-/watch https://youtu.be/<lecture> backprop intuition
+/claude-watch https://youtu.be/<lecture> backprop intuition
 ```
 
 ## Install
 
 | Surface | Command |
 |---|---|
-| **Claude Code** | `/plugin marketplace add devinilabs/claude-watch` then `/plugin install watch@claude-watch` |
-| **claude.ai** (web) | Download `watch.skill` from the latest release → Settings → Capabilities → Skills → `+` |
-| **Codex** | `git clone https://github.com/devinilabs/claude-watch ~/.codex/skills/watch` |
+| **Claude Code** | `/plugin marketplace add devinilabs/claude-watch` then `/plugin install claude-watch@claude-watch` |
+| **claude.ai** (web) | Download `claude-watch.skill` from the latest release → Settings → Capabilities → Skills → `+` |
+| **Codex** | `git clone https://github.com/devinilabs/claude-watch ~/.codex/skills/claude-watch` |
 
 ## What it does
 
@@ -34,10 +34,10 @@
 ## Usage
 
 ```
-/watch <url-or-path> [topic]
-/watch ~/Lectures/cs231n.mp4 backpropagation derivation
-/watch https://youtu.be/<long> --start 5:00 --end 25:00
-/watch <url> --resolution 1024            # for slides with tiny code text
+/claude-watch <url-or-path> [topic]
+/claude-watch ~/Lectures/cs231n.mp4 backpropagation derivation
+/claude-watch https://youtu.be/<long> --start 5:00 --end 25:00
+/claude-watch <url> --resolution 1024            # for slides with tiny code text
 ```
 
 Flags: `--start/--end`, `--max-frames`, `--resolution`, `--scene-threshold`, `--max-gap`, `--whisper groq|openai`, `--no-whisper`, `--out-dir`.
@@ -74,10 +74,10 @@ To force a fresh run, delete the `meta.json` in the library dir.
 git clone https://github.com/devinilabs/claude-watch
 cd claude-watch
 python3 -m pytest                         # full suite
-bash scripts/build-skill.sh               # → dist/watch.skill (claude.ai bundle)
+bash scripts/build-skill.sh               # → dist/claude-watch.skill (claude.ai bundle)
 ```
 
-Releasing: tag `vX.Y.Z`, push the tag — CI builds and attaches `watch.skill`.
+Releasing: tag `vX.Y.Z`, push the tag — CI builds and attaches `claude-watch.skill`.
 
 ## License
 

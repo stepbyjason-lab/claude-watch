@@ -7,14 +7,14 @@
   "keywords": ["video", "lecture", "tutorial", "notes", "transcript", "ffmpeg", "yt-dlp"],
   "skills": [
     {
-      "name": "watch",
+      "name": "claude-watch",
       "path": "."
     }
   ],
   "commands": [
     {
-      "name": "watch",
-      "path": "commands/watch.md"
+      "name": "claude-watch",
+      "path": "commands/claude-watch.md"
     }
   ],
   "hooks": "hooks/hooks.json"

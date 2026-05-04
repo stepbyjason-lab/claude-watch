@@ -1,5 +1,5 @@
 {
-  "name": "watch",
+  "name": "claude-watch",
   "version": "0.1.0",
   "description": "Watch a tutorial/lecture video and produce structured study notes.",
   "entry": "SKILL.md",

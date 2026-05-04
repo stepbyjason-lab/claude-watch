@@ -1,5 +1,5 @@
 ---
-name: watch
+name: claude-watch
 description: Watch a tutorial or lecture video (URL or local path) and produce structured study notes. Downloads with yt-dlp, detects scene changes with ffmpeg, pulls a timestamped transcript (captions or Whisper API fallback), and writes a section-by-section markdown notes file with embedded screenshots to ~/claude-watch/library/<slug>/.
 argument-hint: "<video-url-or-path> [topic-or-question]"
 allowed-tools: Bash, Read, Write, AskUserQuestion
@@ -9,13 +9,13 @@ license: MIT
 user-invocable: true
 ---
 
-# /watch — Claude turns a video into study notes
+# /claude-watch — Claude turns a video into study notes
 
 You don't have a video input. This skill gives you one *and* turns each viewing into a saved notes artifact.
 
 ## Step 0 — Setup preflight (silent on success)
 
-Run on every `/watch` invocation:
+Run on every `/claude-watch` invocation:
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/scripts/setup.py" --check
@@ -35,7 +35,7 @@ If a Whisper key is still missing afterwards, use `AskUserQuestion` to ask wheth
 
 - User pastes a tutorial / lecture / talk URL and asks to study it
 - User points at a local screen recording or video and wants notes
-- User types `/watch <url-or-path> [topic]`
+- User types `/claude-watch <url-or-path> [topic]`
 
 ## How to invoke
 
