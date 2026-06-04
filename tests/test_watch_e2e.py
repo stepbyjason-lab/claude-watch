@@ -20,7 +20,7 @@ def test_watch_end_to_end_on_local_fixture(tmp_path):
             "--no-whisper",
             "--out-dir", str(tmp_path),
         ],
-        capture_output=True, text=True, check=False, cwd=str(ROOT),
+        capture_output=True, text=True, encoding="utf-8", check=False, cwd=str(ROOT),
     )
     assert proc.returncode == 0, f"watch.py failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
 
