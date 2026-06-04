@@ -41,10 +41,20 @@ If a Whisper key is still missing afterwards, use `AskUserQuestion` to ask wheth
 
 **Step 1 — parse input.** Separate the source (URL or path) from any topic the user mentioned. The topic shapes which sections you emphasize in the notes — pass it through to your synthesis, not to the script.
 
-**Step 2 — run the watch script.**
+**Step 1.5 — classify the video and choose extraction flags (before running).** The `--slides` decision changes how frames are extracted, so make it **now**, not after the script has run:
+
+- **Slide lecture / seminar (prepared deck):** run with `--slides` so every unique prepared slide is captured. Do **not** run plain scene mode on a slide deck — that defeats the whole point of slides mode. Group the slides by concept when you write the notes.
+- **Conceptual talk without slides:** plain scene mode; organize the notes by thesis, concepts, arguments, examples, caveats, and applications.
+- **Code walkthrough:** plain scene mode; organize the notes by implementation milestones, intent, design decisions, reusable patterns, and caveats.
+- **Product / UI demo:** plain scene mode; organize the notes by workflow or feature area, with screenshots explaining UI states and decisions.
+
+When you cannot tell whether a lecture uses a prepared deck, prefer `--slides`. This classification fixes both the extraction flags here and the note structure in Step 5; it does not change the raw evidence the script produces.
+
+**Step 2 — run the watch script** with the flags for the mode you chose in Step 1.5 (add `--slides` for slide lectures):
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "<source>"
+python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "<source>"           # scene mode
+python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "<source>" --slides   # slide lecture
 ```
 
 Optional flags:
@@ -65,15 +75,6 @@ Optional flags:
 **Step 3 — read every frame.** The script ends with a structured `=== frames ===` block listing each frame's path and timestamp. `Read` them all in parallel — they render as images in your context.
 
 **Step 4 — load the transcript.** The `=== transcript ===` block points to `transcript.json` (or `transcript.window.json` for focused mode). `Read` it — it's a list of `{t_start, t_end, text, speaker_break}`.
-
-**Step 4.5 — choose the note mode.** Classify the video before drafting:
-
-- **Slide lecture / seminar:** use `--slides` when possible; preserve every unique prepared slide, then group slides by concept in the notes.
-- **Conceptual talk without slides:** organize by thesis, concepts, arguments, examples, caveats, and applications.
-- **Code walkthrough:** organize by implementation milestones, intent, design decisions, reusable patterns, and caveats.
-- **Product / UI demo:** organize by workflow or feature area, with screenshots explaining UI states and decisions.
-
-This classification affects note structure only. It does not change the already-extracted raw evidence.
 
 **Step 5 — write `notes.md` to the library directory.** Use the **concept-first study notes contract** below. The frames and transcript are raw evidence; your job is to synthesize them into a learning document. Save to `<library_dir>/notes.md`. Then print a 3-line summary to chat:
 1. Title and slug
@@ -176,6 +177,7 @@ def forward(x):
 |---|---|---|---|
 | `[t=00:04]` | `frames/0001_t00-04.jpg` | inline | <concept/claim this embedded frame supports> |
 | `[t=00:31]` | `frames/0002_t00-31.jpg` | ledger | <concept/claim this non-embedded slide supports> |
+| `[t=01:12]` | `frames/0003_t01-12.jpg` | ledger | <every slide referenced above (e.g. in "Additional supporting slides") must also appear here> |
 
 ### Optional Embedded Ledger Detail
 
