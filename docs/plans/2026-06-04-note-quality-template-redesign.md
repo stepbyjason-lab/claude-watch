@@ -215,20 +215,22 @@ Replace it with:
 description: Watch a tutorial or lecture video (URL or local path) and produce concept-first study notes. Downloads with yt-dlp, detects scene or slide changes with ffmpeg, pulls a timestamped transcript (captions or Whisper API fallback), and writes synthesized markdown notes with inline visual evidence and timestamped traceability to ~/claude-watch/library/<slug>/.
 ```
 
-- [ ] **Step 2: Add a mode-selection step before writing notes**
+- [ ] **Step 2: Add a mode-selection step BEFORE running extraction**
 
-Insert this section after Step 4:
+The `--slides` decision changes extraction, so mode selection must come **before** the run step (Step 2), not after — otherwise a slide lecture could be captured in plain scene mode. Insert a `Step 1.5` between Step 1 and Step 2:
 
 ```markdown
-**Step 4.5 — choose the note mode.** Classify the video before drafting:
+**Step 1.5 — classify the video and choose extraction flags (before running).** The `--slides` decision changes how frames are extracted, so make it **now**, not after the script has run:
 
-- **Slide lecture / seminar:** use `--slides` when possible; preserve every unique prepared slide, then group slides by concept in the notes.
-- **Conceptual talk without slides:** organize by thesis, concepts, arguments, examples, caveats, and applications.
-- **Code walkthrough:** organize by implementation milestones, intent, design decisions, reusable patterns, and caveats.
-- **Product / UI demo:** organize by workflow or feature area, with screenshots explaining UI states and decisions.
+- **Slide lecture / seminar (prepared deck):** run with `--slides` so every unique prepared slide is captured. Do **not** run plain scene mode on a slide deck — that defeats the whole point of slides mode. Group the slides by concept when you write the notes.
+- **Conceptual talk without slides:** plain scene mode; organize the notes by thesis, concepts, arguments, examples, caveats, and applications.
+- **Code walkthrough:** plain scene mode; organize the notes by implementation milestones, intent, design decisions, reusable patterns, and caveats.
+- **Product / UI demo:** plain scene mode; organize the notes by workflow or feature area, with screenshots explaining UI states and decisions.
 
-This classification affects note structure only. It does not change the already-extracted raw evidence.
+When you cannot tell whether a lecture uses a prepared deck, prefer `--slides`. This classification determines both the extraction flags here and the note structure in Step 5; after the script runs, the returned frames and transcript are treated as the raw evidence you synthesize.
 ```
+
+Then update the existing **Step 2** so it runs with the chosen mode's flags — show both the plain `"<source>"` command and a `"<source>" --slides   # slide lecture` variant, so the classification from Step 1.5 is actually applied at run time.
 
 - [ ] **Step 3: Update Step 5 wording**
 
@@ -346,7 +348,7 @@ assert "One scene = one section" not in text
 assert "The \"On screen\" block is required even for title slides" not in text
 assert "concept-first study notes contract" in text
 assert "concept-first study notes" in text.splitlines()[2]
-assert "Step 4.5" in text
+assert "Step 1.5" in text
 assert "Evidence caption" in text
 assert "Slide Coverage Ledger" in text
 assert "Avoid duplicate embeds" in text

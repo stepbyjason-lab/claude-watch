@@ -48,7 +48,7 @@ If a Whisper key is still missing afterwards, use `AskUserQuestion` to ask wheth
 - **Code walkthrough:** plain scene mode; organize the notes by implementation milestones, intent, design decisions, reusable patterns, and caveats.
 - **Product / UI demo:** plain scene mode; organize the notes by workflow or feature area, with screenshots explaining UI states and decisions.
 
-When you cannot tell whether a lecture uses a prepared deck, prefer `--slides`. This classification fixes both the extraction flags here and the note structure in Step 5; it does not change the raw evidence the script produces.
+When you cannot tell whether a lecture uses a prepared deck, prefer `--slides`. This classification determines **both** the extraction flags here and the note structure in Step 5; after the script runs, the returned frames and transcript are treated as the raw evidence you synthesize.
 
 **Step 2 — run the watch script** with the flags for the mode you chose in Step 1.5 (add `--slides` for slide lectures):
 
