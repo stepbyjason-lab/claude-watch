@@ -147,6 +147,14 @@ def select_scenes(video, meta, args, focus, work, *, cached):
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles/pipes often default to a legacy codec (e.g. cp949) that
+    # cannot encode the en/em-dashes and non-ASCII titles we print, which would
+    # crash the run after work is already done. Force UTF-8 output where supported.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
     p = argparse.ArgumentParser(prog="watch")
     p.add_argument("source", help="URL or local path")
     p.add_argument("--start", help="focus start (SS, MM:SS, or HH:MM:SS)")
