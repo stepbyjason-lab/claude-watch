@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **⚠️ Superseded — notes contract:** the SKILL.md *note-writing* guidance this plan adds (Task 9's "Reading the output in slides mode → one slide = one section" and Task 10's per-scene template) was **replaced** by the concept-first redesign. For the current note contract see [`2026-06-04-note-quality-template-redesign.md`](2026-06-04-note-quality-template-redesign.md) (plan) and [`../specs/2026-06-04-note-quality-template-redesign.md`](../specs/2026-06-04-note-quality-template-redesign.md) (spec). The `--slides` **extraction** pipeline (Tasks 1–9) is still current; only the "one slide = one section" / scene-first template is obsolete. **Do not re-add it.**
+
 **Goal:** Add a `--slides` mode to claude-watch that captures every unique slide of a lecture video, legibly, without silently dropping distinct slides.
 
 **Architecture:** A separate detection path (`scripts/slides.py`) that (1) downloads 720p, (2) scene-detects on a *cropped* slide region (cam/caption excluded) at a low threshold, (3) adds a tight coverage floor, (4) extracts candidates once at native 720p, (5) deduplicates near-identical frames via a zero-dependency perceptual hash computed on the slide region — conservatively, flagging borderline pairs instead of dropping them. The existing non-slides pipeline is untouched (byte-identical defaults); the only shared-code change is one optional `prefilter=` kwarg on `detect_scenes`.

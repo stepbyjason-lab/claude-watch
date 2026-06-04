@@ -150,7 +150,7 @@ download(720p) → [slides.py] crop-detect → floor(촘촘) → phash dedup →
 
 ### 8.7 통합 지점 / 소비자 (architect H4·M4)
 - watch.py `main()`에 `if args.slides` **인라인 금지**(focus×slides×cached 조합 폭발) → **`select_scenes(video, meta, args, focus)` 전략 시seam**로 분기, main은 선형 유지.
-- **SKILL.md 변경집합 포함** — slides 모드용 노트 템플릿 분기("one slide = one section", floor/detected 구분 없음, `slides_extracted`·`review: near-dup` 소비). 안 그러면 Claude가 슬라이드덱에 토킹헤드 템플릿 적용.
+- **SKILL.md 변경집합 포함** — slides 모드 출력(`slides_extracted`·`review: near-dup`)을 SKILL.md가 소비하게. ⚠️ **개정됨**: 초안의 "one slide = one section" 노트 분기는 이후 **concept-first 재설계**로 대체됨(`docs/specs/2026-06-04-note-quality-template-redesign.md`) — 슬라이드는 개념 단위로 묶고 Slide Coverage Ledger로 전수 회계. (extraction 동작은 무변경.)
 
 ### 8.8 detect_slides 분해 (architect H1)
 - 단일 거대 함수 금지 → 순수 단위로: `build_crop_vf(w,h,cam_corner,caption)->str`(순수, §4.5 단위테스트), `detect_slide_cuts(video,crop_vf,threshold)->Scene[]`(detect_scenes 재사용), `phash_dedup(frame_paths,drop_dist,flag_dist)->(keep_idx,flagged_pairs)`(순수, 디스크 JPEG만). `detect_slides`는 ~20줄 오케스트레이터.

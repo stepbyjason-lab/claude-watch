@@ -2,6 +2,21 @@
 
 All notable changes to `claude-watch` are documented here.
 
+## [Unreleased] — fork `stepbyjason-lab/claude-watch`
+
+Additive changes on top of upstream `devinilabs/claude-watch`. Classic extraction and existing library caches are unchanged.
+
+### Added
+- **`--slides` mode** — captures every unique slide of a lecture deck: crops out the presenter cam + caption, scene-detects on the slide region at a low threshold, and conservatively deduplicates near-identical frames via a zero-dependency `ffmpeg` 8×8 average hash (borderline pairs are kept and flagged, not silently dropped). Native 720p extraction. Flags: `--slides`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`.
+- Slides cache identity: the full detection profile is folded into the slug (any slide flag change re-runs cleanly); default-mode slugs hash identically to upstream.
+- Hardening: `-protocol_whitelist file` on all ffmpeg inputs, `urlparse`-based source-scheme allowlist, candidate-frame cap, and UTF-8 stdout/stderr (no cp949 crash on Windows).
+
+### Changed
+- **Notes are now concept-first.** The scene-first "one scene/slide = one section" template (On screen + Said + Synthesis per scene) was replaced by a concept-first study-notes contract: core thesis, concept map, learning path, frameworks/examples/caveats, inline visual evidence with captions, and a slide coverage ledger — gated by a pre-write quality check. Screenshots and timestamps are evidence, not the main structure. Script/extraction output is unchanged.
+
+### Docs
+- Design specs, TDD plans, an implementation log, and good/bad note fixtures + a scoring rubric under `docs/`.
+
 ## [0.1.0] — 2026-05-03
 
 ### Added

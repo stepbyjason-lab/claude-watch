@@ -6,6 +6,8 @@ Complete record of the `--slides` feature: design → multi-lens review → 3-ro
 - **Branch:** `feat/slides-mode`
 - **Companion docs:** [`docs/specs/2026-06-04-slides-mode-design.md`](specs/2026-06-04-slides-mode-design.md) (design v2, §8 authoritative) · [`docs/plans/2026-06-04-slides-mode.md`](plans/2026-06-04-slides-mode.md) (11 TDD tasks)
 
+> **Follow-on (same day):** after this slides work, the SKILL.md **note-writing contract** was redesigned from scene-first ("one slide = one section") to **concept-first study notes** — see [`docs/plans/2026-06-04-note-quality-template-redesign.md`](plans/2026-06-04-note-quality-template-redesign.md) and [`docs/specs/2026-06-04-note-quality-template-redesign.md`](specs/2026-06-04-note-quality-template-redesign.md). Where this log mentions the original "one slide = one section" slides-reading guidance (§5, Task 10 row), that guidance has since been **replaced**. The `--slides` *extraction* behavior recorded here is unchanged.
+
 ---
 
 ## 1. What shipped
