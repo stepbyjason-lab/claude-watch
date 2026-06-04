@@ -15,7 +15,7 @@
 ## Design decisions locked from spec §8 (read before starting)
 
 - **Completeness over dedup (§8.0):** over-capture, never silent-miss. `phash_dedup` drops only near-identical frames (`drop_dist`, small); borderline pairs (`drop_dist < d <= flag_dist`) are KEPT and reported.
-- **Cache identity (§8.1):** slides runs get a distinct library dir (mode+resolution folded into the slug) and a separate `slides.json` scene cache — never reuse a normal run's 360p `video.*` or whole-frame scenes.
+- **Cache identity (§8.1):** slides runs get a distinct library dir — mode + resolution + the **full detection profile** (crop/threshold/gap/phash flags) folded into the slug (Task 6), so changing any flag busts the cache. Never reuse a normal run's 360p `video.*` or whole-frame scenes. Slides mode writes **no** scene-cache file; slug isolation alone guarantees correctness.
 - **Minimal upstream diff (§8.2):** do NOT add `kind="slide"` to `Scene`. Add one `prefilter=""` kwarg to `detect_scenes` (default keeps byte-identical behavior).
 - **Single extraction (§8.3):** detect pass writes no frames; extract candidates ONCE at full 720p; phash-dedup on those JPEGs; `unlink()` losers. No re-decode.
 - **Zero new dependency (§8.4):** perceptual hash via ffmpeg `scale=8:8,format=gray` → 64 raw bytes → 64-bit average hash.
@@ -28,7 +28,7 @@
 | `scripts/scenes.py` | Modify | Add `prefilter=` kwarg to `detect_scenes` (reuse parser for crop detection) |
 | `scripts/slides.py` | **Create** | Slide-mode: `probe_dimensions`, `build_crop_vf`, `ahash`/`hamming`, `phash_dedup`, `detect_slides` orchestrator |
 | `scripts/download.py` | Modify | `download_video(..., fmt=...)` enum format selection (default byte-identical) |
-| `scripts/library.py` | Modify | `slug_for` folds `mode`+`dl_resolution` into the hash (distinct dirs) |
+| `scripts/library.py` | Modify | `slug_for` folds mode + resolution + full slides profile into the hash; non-slides keeps upstream hash (distinct dirs) |
 | `scripts/frames.py` | Modify | `extract_frames(..., native=False)` — native (no-downscale) extraction |
 | `scripts/watch.py` | Modify | `--slides/--cam-corner/--caption/--hi-res/--phash-dist` flags, input validation, `select_scenes()` seam, download-format branch, manifest fields, out-dir containment |
 | `SKILL.md` | Modify | Slides-mode notes guidance for the agent consumer |
@@ -492,7 +492,7 @@ git commit -m "feat(download): enum format selection (720p/1080p), default uncha
 
 ---
 
-## Task 6: `slug_for` folds mode + resolution into identity (cache isolation)
+## Task 6: `slug_for` folds full slides profile into identity (cache isolation)
 
 **Files:**
 - Modify: `scripts/library.py` (`slug_for`)
@@ -518,8 +518,28 @@ def test_slug_default_mode_unchanged_when_fields_absent():
     # Back-compat: a meta without mode/dl_resolution must hash the same as one
     # that explicitly sets the defaults.
     bare = {"title": "L", "source": "https://x", "watched_at": "2026-05-03", "focus_range_str": ""}
-    explicit = dict(bare, mode="default", dl_resolution="best")
+    explicit = dict(bare, mode="default", dl_resolution="best", slides_profile="")
     assert slug_for(bare) == slug_for(explicit)
+
+
+def test_slug_default_mode_matches_upstream_hash():
+    # Existing (pre-feature) caches must keep hitting: default mode hashes
+    # sha1(source + '|' + focus) exactly, ignoring slides_profile noise.
+    import hashlib
+    meta = {"title": "L", "source": "https://x", "watched_at": "2026-05-03", "focus_range_str": ""}
+    expected = hashlib.sha1(("https://x" + "|" + "").encode("utf-8")).hexdigest()[:4]
+    assert slug_for(meta).endswith("-" + expected)
+
+
+def test_slug_busts_on_any_slides_flag_change():
+    # cam_corner / threshold / phash distance changes must each yield a new slug.
+    a = {"title": "L", "source": "https://x", "watched_at": "2026-05-03", "focus_range_str": "",
+         "mode": "slides", "dl_resolution": "720p", "slides_profile": "tr|bottom|0.1|20|4|10"}
+    for changed in ("tl|bottom|0.1|20|4|10",   # cam_corner
+                    "tr|top|0.1|20|4|10",        # caption
+                    "tr|bottom|0.2|20|4|10",     # threshold
+                    "tr|bottom|0.1|20|6|12"):    # phash dist
+        assert slug_for(a) != slug_for(dict(a, slides_profile=changed))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -531,16 +551,23 @@ Expected: FAIL — slugs equal (mode not in hash)
 
 ```python
 def slug_for(meta: dict) -> str:
-    """`YYYY-MM-DD-<sanitized-title>-<short-hash>` where
-    hash = sha1(source + focus + mode + dl_resolution)[:4].
-    mode/dl_resolution default to 'default'/'best' so non-slides callers are unchanged."""
+    """`YYYY-MM-DD-<sanitized-title>-<short-hash>`.
+
+    Default (non-slides) mode hashes EXACTLY as upstream (sha1(source + '|' + focus))
+    so existing cached libraries are preserved. Slides mode folds the full detection
+    profile into the hash so changing ANY slides flag (resolution, crop, threshold,
+    gap, phash distances) yields a fresh slug — the cache-bust spec §8.1 requires."""
     date = meta.get("watched_at") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     title = sanitize_title(meta.get("title", "untitled"))
     src = meta.get("source", "")
     focus = meta.get("focus_range_str", "")
     mode = meta.get("mode", "default")
-    res = meta.get("dl_resolution", "best")
-    key = "|".join([src, focus, mode, res])
+    if mode == "default":
+        key = src + "|" + focus  # upstream-identical: existing caches keep hitting
+    else:
+        res = meta.get("dl_resolution", "best")
+        profile = meta.get("slides_profile", "")  # built by watch.py from all slides flags
+        key = "|".join([src, focus, mode, res, profile])
     h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:4]
     return f"{date}-{title}-{h}"
 ```
@@ -554,7 +581,7 @@ Expected: PASS. NOTE: existing `test_slug_is_stable_for_same_url_and_focus` and 
 
 ```bash
 git add scripts/library.py tests/test_library.py
-git commit -m "feat(library): fold mode+resolution into slug (slides cache isolation)"
+git commit -m "feat(library): fold full slides profile into slug (cache isolation, non-slides hash unchanged)"
 ```
 
 ---
@@ -718,8 +745,6 @@ def detect_slides(
     3. extract every candidate ONCE at native width (full-frame JPEGs)
     4. phash-dedup on the slide region of those JPEGs; unlink dropped files
     """
-    from scripts.scenes import Scene  # local import to avoid cycle at top
-    duration = float(probe_dimensions.__doc__ and 0.0)  # placeholder removed below
     w, h = probe_dimensions(video)
     crop_vf = build_crop_vf(w, h, cam_corner, caption)
 
@@ -772,9 +797,9 @@ def _probe_duration(video: Path) -> float:
     return float(out or 0.0)
 ```
 
-> **Implementer note:** delete the `duration = float(probe_dimensions.__doc__ ...)` placeholder line — it is a marker that must not survive; `dur` is computed by `_probe_duration`. (Kept here only to flag that the orchestrator needs duration; do NOT ship the placeholder.)
+> **Note:** `detect_slides` returns frame records with `path` = **basename** (e.g. `0001_t00-00.jpg`), matching `extract_frames`. The caller (`watch.py`, Task 9) prepends `frames/` for the manifest — identical to the classic path — while `abspath` is used for hashing/unlink. Do not prepend `frames/` inside `detect_slides`.
 
-> **Known v1 limitation (spec §8.3):** candidate extraction is one `extract_frames` pass (1 decode + N keyframe seeks). The further optimization (single ffmpeg `select`+frame-dump pass) is deferred — N≈20–60 seeks is acceptable.
+> **v1 performance (spec §8.3):** candidate extraction is one `extract_frames` pass = 1 full decode + N keyframe seeks. The single-ffmpeg `select`+frame-dump optimization (0 seeks) is explicitly deferred — N≈20–60 seeks is acceptable for v1.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -800,15 +825,29 @@ git commit -m "feat(slides): detect_slides orchestrator (detect->floor->extract-
 
 ```python
 import pytest
-from scripts.watch import _validate_slides_args, _scheme_ok
+from scripts.watch import _validate_slides_args, _scheme_ok, _validate_slides_focus
 
 
-def test_scheme_ok_rejects_file_and_ftp():
+def test_scheme_ok_allows_http_and_local_rejects_other_schemes():
     assert _scheme_ok("https://youtu.be/x")
     assert _scheme_ok("http://x")
-    assert _scheme_ok("/local/path.mp4")          # local path allowed (not a URL scheme)
+    assert _scheme_ok("/local/path.mp4")          # POSIX local path (no scheme)
+    assert _scheme_ok("D:\\videos\\lecture.mp4")  # Windows drive, backslash
+    assert _scheme_ok("C:/videos/x.mp4")          # Windows drive, single forward slash
+    assert _scheme_ok("video.mp4")                # bare relative path
     assert not _scheme_ok("file:///etc/passwd")
     assert not _scheme_ok("ftp://x/y")
+    assert not _scheme_ok("rtmp://x/y")           # narrow prefix blocklist would miss this
+    assert not _scheme_ok("data:text/plain,x")
+    assert not _scheme_ok("x://evil")             # 1-char scheme is a URL, NOT a drive path
+    assert not _scheme_ok("z://host/file")        # the len(scheme)==1 hole — must stay closed
+
+
+def test_validate_rejects_slides_with_focus():
+    with pytest.raises(SystemExit):
+        _validate_slides_focus(slides=True, focus=(10.0, 20.0))
+    _validate_slides_focus(slides=True, focus=None)   # ok
+    _validate_slides_focus(slides=False, focus=(1.0, 2.0))  # ok (classic supports focus)
 
 
 def test_validate_slides_args_threshold_range():
@@ -831,16 +870,25 @@ Expected: FAIL — `ImportError: cannot import name '_scheme_ok'`
 Add helpers + argparse flags + the `select_scenes` seam. Add near the top (after imports):
 
 ```python
+import re
+from urllib.parse import urlparse
+
 from scripts import slides as slides_mod
+
+# A Windows drive path: '<letter>:' then a backslash, OR a single forward slash
+# that is NOT followed by another slash. This deliberately does NOT match
+# 'x://host' (drive-letter-looking URL authority), which must be rejected.
+_WIN_DRIVE_PATH = re.compile(r"^[A-Za-z]:(?:\\|/(?!/))")
 
 
 def _scheme_ok(source: str) -> bool:
-    """Reject non-http(s) URL schemes (file://, ftp://, ...). Local paths (no scheme) ok."""
-    lowered = source.lower()
-    for bad in ("file:", "ftp:", "data:", "gopher:"):
-        if lowered.startswith(bad):
-            return False
-    return True
+    """Allow http(s) URLs and local filesystem paths; reject every other URL
+    scheme (file://, ftp://, rtmp://, data:, and 1-char schemes like 'x://evil').
+    Windows drive paths ('C:\\x', 'C:/x') are local; 'x://host' is a URL even
+    though its scheme is one character — the '//' authority gives it away."""
+    if _WIN_DRIVE_PATH.match(source):
+        return True
+    return urlparse(source).scheme in ("", "http", "https")
 
 
 def _validate_slides_args(*, scene_threshold: float, phash_dist: int) -> None:
@@ -848,6 +896,13 @@ def _validate_slides_args(*, scene_threshold: float, phash_dist: int) -> None:
         sys.exit(f"--scene-threshold must be in (0,1); got {scene_threshold}")
     if not (0 <= phash_dist <= 64):
         sys.exit(f"--phash-dist must be in [0,64]; got {phash_dist}")
+
+
+def _validate_slides_focus(*, slides: bool, focus) -> None:
+    """v1 does not support focus-windowed slide capture; the two flags conflict."""
+    if slides and focus is not None:
+        sys.exit("--slides cannot be combined with --start/--end in v1 "
+                 "(focus-windowed slide capture is not supported yet)")
 ```
 
 Add argparse flags in `main()` after the existing ones:
@@ -865,11 +920,14 @@ Add argparse flags in `main()` after the existing ones:
                    help="slides dedup drop distance (<= this = duplicate)")
 ```
 
-After `args = p.parse_args(argv)` add the guards:
+After `args = p.parse_args(argv)`, and right after the existing `focus = _focus_range(args)`
+line in `main()` (~line 66), add the guards:
 
 ```python
     if not _scheme_ok(args.source):
         sys.exit(f"refusing non-http(s)/local scheme: {args.source}")
+    focus = _focus_range(args)  # existing line — keep; the guards below depend on it
+    _validate_slides_focus(slides=args.slides, focus=focus)
     if args.slides:
         _validate_slides_args(scene_threshold=args.scene_threshold, phash_dist=args.phash_dist)
 ```
@@ -881,8 +939,19 @@ Set mode/resolution into meta BEFORE `slug = lib.slug_for(meta)` (around line 68
     meta["mode"] = "slides" if args.slides else "default"
     if args.slides:
         meta["dl_resolution"] = "1080p" if args.hi_res else "720p"
+        # slides_profile feeds slug_for: changing ANY detection flag → new slug → no
+        # stale frames reuse (spec §8.1). Order must stay stable.
+        meta["slides_profile"] = "|".join([
+            args.cam_corner,
+            args.caption,
+            f"{args.scene_threshold}",
+            f"{min(args.max_gap, 20.0)}",
+            f"{args.phash_dist}",
+            f"{args.phash_dist + 6}",   # flag_dist, kept in sync with select_scenes
+        ])
     else:
         meta["dl_resolution"] = "best"
+        meta["slides_profile"] = ""
     slug = lib.slug_for(meta)
 ```
 
@@ -897,14 +966,25 @@ In the download stage (line 80-84), branch the format:
             video = download_mod.copy_local(Path(meta["source"]), src_dir, basename="video")
 ```
 
-Replace the Stage-4 scene block (lines 129-160) with a `select_scenes` call. Add this function above `main()`:
+Add a complete `select_scenes` strategy seam above `main()`. It owns Stages 4+5 for
+BOTH modes (containment guard, detection, extraction, manifest-relative paths) so
+`main()` stays linear (architect H4). The classic branch is the verbatim upstream
+Stage 4/5 logic; the slides branch delegates to `detect_slides`:
 
 ```python
-def select_scenes(video, meta, args, focus, work):
-    """Strategy seam: returns (capped_scenes, flagged_pairs, scene_cache_name).
-    Slides mode -> slides.detect_slides; else the classic detect+floor+cap path."""
+def select_scenes(video, meta, args, focus, work, *, cached):
+    """Returns (frame_records, scenes, flagged):
+      - frame_records: [{index, t, path='frames/<name>', kind}] — already on disk
+      - scenes:        [{t, score, kind}] for manifest.scenes
+      - flagged:       [(t_a, t_b, dist)] slides near-dup review pairs ([] classic)
+    Both branches extract into work/frames and prepend 'frames/' identically, so the
+    manifest path is consistent regardless of mode."""
+    frames_dir = work / "frames"
+    # containment: a crafted --out-dir must never let us touch files outside the library
+    frames_dir.resolve().relative_to(lib.LIBRARY_ROOT.resolve())
+
     if args.slides:
-        frames_dir = work / "frames"
+        # detect_slides detects + extracts + dedups into frames_dir in one shot.
         result = slides_mod.detect_slides(
             video, out_dir=frames_dir,
             cam_corner=args.cam_corner, caption=args.caption,
@@ -912,25 +992,64 @@ def select_scenes(video, meta, args, focus, work):
             drop_dist=args.phash_dist, flag_dist=args.phash_dist + 6,
             width_px=1280, candidate_cap=800,
         )
-        # detect_slides already extracted+deduped the frames into frames_dir.
-        return result, "slides.json"
-    # classic path (unchanged logic, moved verbatim) ...
-```
+        frame_records = [{**fr, "path": f"frames/{fr['path']}"} for fr in result["slides"]]
+        scenes = [{"t": fr["t"], "score": 1.0, "kind": fr["kind"]} for fr in result["slides"]]
+        return frame_records, scenes, result["flagged"]
 
-> **Implementer note:** because `detect_slides` both detects AND extracts (single pass, §8.3), the slides branch SKIPS the later `extract_frames` call. Restructure Stage 5 so: if `args.slides`, use `result["slides"]` directly as the frame records (they are already on disk, relative paths) and `result["flagged"]` for the manifest; else run the existing `detect_scenes/floor/cap` + `extract_frames`. Keep the two branches in `select_scenes` / a sibling `extract_for_default()` so `main()` stays linear (architect H4).
-
-Out-dir containment before the frames wipe (Stage 5, line 164-167) — guard it:
-
-```python
-    frames_dir = work / "frames"
-    frames_dir_r = frames_dir.resolve()
-    frames_dir_r.relative_to(lib.LIBRARY_ROOT.resolve())  # raises ValueError if escaping root
-    if frames_dir.exists() and not args.slides:  # slides mode manages its own dir
+    # ---- classic path (verbatim upstream Stage 4/5 logic) ----
+    scenes_path = work / "scenes.json"
+    if cached and scenes_path.exists() and not focus:
+        raw_scenes = [
+            scenes_mod.Scene(t=s["t"], score=s["score"], kind=s["kind"])
+            for s in json.loads(scenes_path.read_text())
+        ]
+    else:
+        raw_scenes = scenes_mod.detect_scenes(video, threshold=args.scene_threshold)
+    if focus:
+        s0, s1 = focus
+        s1 = min(s1, meta["duration_s"])
+        raw_scenes = [s for s in raw_scenes if s0 <= s.t <= s1]
+        if not raw_scenes or raw_scenes[0].t > s0:
+            raw_scenes.insert(0, scenes_mod.Scene(t=s0, score=1.0, kind="detected"))
+        max_gap = min(args.max_gap, 15.0)
+        duration_for_floor = s1
+    else:
+        max_gap = args.max_gap
+        duration_for_floor = meta["duration_s"]
+    floored = scenes_mod.apply_coverage_floor(
+        raw_scenes, duration_s=duration_for_floor, max_gap_s=max_gap
+    )
+    capped = scenes_mod.apply_budget_cap(floored, max_frames=args.max_frames)
+    if not focus:
+        scenes_path.write_text(json.dumps(
+            [{"t": s.t, "score": s.score, "kind": s.kind} for s in capped], indent=2,
+        ))
+    if frames_dir.exists():  # wipe stale frames so re-runs don't accumulate orphans
         for f in frames_dir.iterdir():
             f.unlink()
+    raw_frame_records = frames_mod.extract_frames(
+        video, capped, out_dir=frames_dir, width_px=args.resolution
+    )
+    frame_records = [{**fr, "path": f"frames/{fr['path']}"} for fr in raw_frame_records]
+    scenes = [{"t": s.t, "score": s.score, "kind": s.kind} for s in capped]
+    return frame_records, scenes, []
 ```
 
-Manifest/stdout: add `slides_extracted` and `review` lines when `args.slides`:
+Then replace the entire body of `main()`'s old Stage 4 + Stage 5 (the `detect_scenes`/
+`apply_coverage_floor`/`apply_budget_cap`/`extract_frames` block plus the `frames/`
+prefix list comp, ~lines 129-176 upstream) with one call:
+
+```python
+    # ---- Stage 4+5: detect + extract (mode-dispatched) ----
+    frame_records, scenes, flagged = select_scenes(
+        video, meta, args, focus, work, cached=cached
+    )
+```
+
+`write_manifest(...)` is unchanged but now consumes these: pass `scenes=scenes` and
+`frames=frame_records` (delete the old inline `[{"t": s.t, ...} for s in capped]`).
+
+Add the slides stdout lines after the existing `=== frames ===` loop:
 
 ```python
     if args.slides:
@@ -940,7 +1059,10 @@ Manifest/stdout: add `slides_extracted` and `review` lines when `args.slides`:
                   f"~ t={int(tb)//60:02d}:{int(tb)%60:02d} (dist {d})")
 ```
 
-The scene cache write (line 156-160) must use `scene_cache_name` (`slides.json` in slides mode) and be gated so slides mode does not collide with `scenes.json`.
+Note: slides mode writes **no** scene-cache file. Correctness comes from slug isolation
+(any flag change → new library dir, Task 6), not a `slides.json` cache; `detect_slides`
+re-runs each invocation (cheap relative to download). The classic path keeps writing
+`scenes.json` exactly as upstream.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1054,9 +1176,9 @@ git commit -m "test(slides): network-gated regression on harness deck (~28 slide
 
 ## Self-review checklist (run before execution)
 
-- **Spec coverage:** §8.0 flag-not-drop → Task 4. §8.1 cache identity → Task 6 (+ Task 9 slides.json). §8.2 prefilter/no-kind-slide → Task 1 (+ Tasks 3/8 reuse Scene unchanged). §8.3 single extraction → Task 8. §8.4 zero-dep hash → Task 3. §8.5 security (choices/scheme/threshold/cap/whitelist/containment/enum-format) → Tasks 2,5,7,9. §8.6 native extract → Task 7. §8.7 select_scenes seam + SKILL.md → Tasks 9,10. §8.8 decomposition → Tasks 2-4,8.
+- **Spec coverage:** §8.0 flag-not-drop → Task 4. §8.1 cache identity (full slides_profile in slug, no scene-cache file) → Task 6 (+ Task 9 sets `meta['slides_profile']`). §8.2 prefilter/no-kind-slide → Task 1 (+ Tasks 3/8 reuse Scene unchanged). §8.3 1-decode+N-seek (single-dump deferred) → Tasks 8,9. §8.4 zero-dep hash → Task 3. §8.5 security (choices/urlparse-scheme/threshold/cap/whitelist/containment/enum-format) → Tasks 2,5,7,9. §8.6 native extract → Task 7. §8.7 select_scenes seam + SKILL.md → Tasks 9,10. §8.8 decomposition → Tasks 2-4,8. **focus×slides:** v1 forbids the combo (`_validate_slides_focus`, Task 9).
 - **Open from §8.9** (tune crop defaults, overlap policy, floor∈dedup): crop defaults tuned in Task 11; overlap/<50% handled in Task 2; floor frames flow through `phash_dedup` in Task 8 (floored list is the candidate set).
-- **Placeholder:** Task 8 contains ONE intentional placeholder line flagged for deletion (the `probe_dimensions.__doc__` marker) — implementer must remove it; `dur` comes from `_probe_duration`.
+- **Placeholder:** none. (The earlier duration-probe placeholder marker in Task 8 was removed; duration comes from `_probe_duration`.)
 - **Type consistency:** frame records carry `index,t,path,kind`; `detect_slides` returns `{"slides":[records],"flagged":[(t,t,d)]}`; `phash_dedup(records, *, crop_vf, drop_dist, flag_dist, hash_fn)`; `ahash(path, crop_vf)`; `build_crop_vf(w,h,cam_corner,caption,*,cam_frac,cap_frac)`; `download_video(...,fmt=)`; `extract_frames(...,native=)` — consistent across tasks.
 
 ## Out of scope (do NOT implement — spec §5/§8.10)

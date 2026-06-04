@@ -115,18 +115,20 @@ download(720p) → [slides.py] crop-detect → floor(촘촘) → phash dedup →
 - 임계 2단(`--phash-dist` 단일값의 텍스트덱 vs 다이어그램덱 민감도 문제 완화): `drop_dist`(이하면 확실 중복→drop) < `flag_dist`(사이면 플래그). 기본 보수값.
 
 ### 8.1 캐시 정체성 (architect C1/C2 — CRITICAL)
-- 원안 치명결함: `resolve.hash_source`(source만)·`library.slug_for`(source+focus만)·`scenes.json` 재사용이 **모드/해상도 무지** → `--slides` 실행이 이전 일반 실행의 360p `video.*`나 whole-frame `scenes.json`을 **조용히 재사용**해 모드 무력화.
-- ✅ 수정: **slug/source_hash에 `mode`(slides/default) + 다운로드 해상도(720/1080)를 포함** → slides·일반 실행이 **다른 library 디렉토리**를 갖고 `video.*`를 절대 공유 안 함. scene 캐시는 **별도 `slides.json`**(일반 `scenes.json`과 분리). 플래그(crop/threshold) 변경 시 새 slug → 재감지(L3 cache-bust 해결).
+- 원안 치명결함: `library.slug_for`(source+focus만)·`scenes.json` 재사용이 **모드/해상도/플래그 무지** → `--slides` 실행이 이전 일반 실행의 360p `video.*`나 whole-frame `scenes.json`을 **조용히 재사용**해 모드 무력화.
+- ✅ 수정: **slug에 `mode` + 다운로드 해상도 + 전체 detection 프로파일**(`slides_profile` = cam_corner·caption·scene_threshold·max_gap·drop_dist·flag_dist)을 포함 → slides·일반 실행이 **다른 library 디렉토리**를 갖고 `video.*`를 절대 공유 안 함. **어떤 slides 플래그를 바꿔도 새 slug → 자동 cache-bust**(L3 해결).
+- **비-default(일반) 모드는 upstream 해시(`sha1(source|focus)`)를 그대로 보존** → 기존 캐시 라이브러리 무효화 0.
+- slides 모드는 **별도 scene-cache 파일을 쓰지 않음**(옛 설계의 `slides.json` 폐기). slug 격리만으로 정확성 보장 — 플래그가 바뀌면 디렉토리 자체가 달라져 stale 재사용 불가. `detect_slides`는 매 실행 재감지(다운로드 대비 저렴).
 
 ### 8.2 upstream diff 최소화 (architect H2/H3 — fork 유지보수 R4)
 - ❌ `kind="slide"` 추가 **안 함** — `apply_budget_cap`의 `{detected,floor}` 파티션 깨짐. `Scene` dataclass **byte-identical 유지**(가장 많이 재사용되는 타입, 0 diff).
 - ✅ `scenes.detect_scenes(video, threshold, *, prefilter="")` **kwarg 1개 추가**(기본 "" → 기존 동작 동일). slides는 `prefilter="crop=..."`만 넘겨 **stderr 파서·t=0 앵커·fallback 전부 재사용**(40줄 복붙 회피).
 - 추출 프로파일(720p full-frame)은 `Scene` 정체성이 아니라 **`extract_frames` 인자**로(이미 watch가 width 제어).
 
-### 8.3 단일 패스 (performance — 최대 효율 이득)
-- 원안 3패스(감지 full-decode → phash용 임시추출 N seek → 최종추출 K seek) 중 **pass2/pass3는 같은 작업 분할**.
-- ✅ **감지 패스에서 후보 프레임을 동시 덤프**: `ffmpeg -i v -vf "crop=...,select='gt(scene,T)',showinfo" -vsync 0 -q:v 3 cand_%04d.jpg` → 타임스탬프(stderr) + 후보 JPEG 동시 산출(비디오 1회 디코드). **단 저장본은 full-frame 필요** → 1차 구현은 **crop은 scene 점수 산출용으로만 쓰되 출력은 full-frame**(split 필터 stateful 복잡성 회피), **phash는 Python에서 JPEG의 crop 하위영역**으로 계산. 그 후 phash dedup은 디스크 JPEG에서만(비디오 재접근 0).
-- 결과: **3패스 → 1 full decode + 0 재디코드**. (최종 survivor는 이미 디스크에 있음 → 별도 추출 불필요, loser만 `unlink`.)
+### 8.3 패스 최소화 (performance)
+- 원안 3패스(감지 full-decode → phash용 임시추출 N seek → 최종추출 K seek) 중 **pass2/pass3는 같은 작업 분할** — 후보를 한 번만 추출하고 그 JPEG로 phash하면 최종추출(K seek)이 사라짐.
+- ✅ **v1 구현 채택 = 1 full decode + N keyframe seek**: 감지 패스(`detect_scenes` + crop `prefilter`, null 출력) → 후보를 `extract_frames`로 **한 번만** 720p 추출(N seek) → 디스크 JPEG에서 phash dedup → loser만 `unlink`. **비디오 재접근 0**(survivor는 이미 디스크). N≈20~60 seek 허용.
+- ⏸ **deferred 최적화** (v1 미채택): 감지 패스에서 후보를 동시 덤프(`ffmpeg -vf "crop=...,select=...,showinfo" -vsync 0 cand_%04d.jpg`)해 N seek까지 제거(1 decode + 0 seek). split-filter stateful 복잡성 + 저장본 full-frame 요구 때문에 v1 보류. 실측 후 필요 시 도입.
 
 ### 8.4 zero-dependency phash (architect M2)
 - ❌ Pillow/imagehash 신규 의존성 추가 **안 함**(dev-workflow "의존성 추가" 게이트 + repo는 ffmpeg/yt-dlp shell-out만).
