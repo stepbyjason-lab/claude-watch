@@ -2,7 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from scripts.slides import ahash, build_crop_vf, hamming, phash_dedup
+from scripts.slides import (
+    CandidateCapExceeded,
+    ahash,
+    build_crop_vf,
+    detect_slides,
+    hamming,
+    phash_dedup,
+    probe_dimensions,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_10s.mp4"
 
@@ -148,3 +156,49 @@ def test_dedup_keeps_clearly_distinct_without_flag():
     )
     assert [r["t"] for r in kept] == [0.0, 1.0]
     assert flagged == []
+
+
+@pytest.mark.integration
+def test_probe_dimensions_reads_fixture_wh():
+    w, h = probe_dimensions(FIXTURE)
+    assert w > 0 and h > 0
+
+
+@pytest.mark.integration
+def test_detect_slides_returns_frame_records_on_fixture(tmp_path):
+    out = detect_slides(
+        FIXTURE,
+        out_dir=tmp_path,
+        cam_corner="none",
+        caption="none",
+        threshold=0.30,
+        max_gap=20.0,
+        drop_dist=4,
+        flag_dist=10,
+        width_px=1280,
+        candidate_cap=800,
+    )
+    assert out["slides"]
+    assert len(out["slides"]) >= 2
+    for record in out["slides"]:
+        assert (tmp_path / record["path"]).exists()
+        assert Path(record["path"]).name == record["path"]
+    assert "flagged" in out
+
+
+@pytest.mark.integration
+def test_detect_slides_enforces_candidate_cap_after_coverage_floor(tmp_path):
+    with pytest.raises(CandidateCapExceeded):
+        detect_slides(
+            FIXTURE,
+            out_dir=tmp_path,
+            cam_corner="none",
+            caption="none",
+            threshold=0.30,
+            max_gap=2.0,
+            drop_dist=4,
+            flag_dist=10,
+            width_px=1280,
+            candidate_cap=2,
+        )
+    assert not list(tmp_path.glob("*.jpg"))
