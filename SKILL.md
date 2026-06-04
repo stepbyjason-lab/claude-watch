@@ -56,6 +56,11 @@ Optional flags:
 - `--whisper groq|openai` — force backend
 - `--no-whisper` — disable Whisper entirely
 - `--out-dir DIR` — override library root
+- `--slides` — **slide-deck mode**: capture every unique slide (see *Slides mode* below)
+- `--cam-corner {tr,tl,br,bl,none}` — presenter-cam corner to exclude (slides mode; default `tr`)
+- `--caption {bottom,top,none}` — burned-in caption band to exclude (slides mode; default `bottom`)
+- `--hi-res` — slides mode: download 1080p instead of 720p (tiny-text decks)
+- `--phash-dist N` — slides dedup distance; lower keeps more near-duplicates (default 4)
 
 **Step 3 — read every frame.** The script ends with a structured `=== frames ===` block listing each frame's path and timestamp. `Read` them all in parallel — they render as images in your context.
 
@@ -67,6 +72,32 @@ Optional flags:
 3. Path to the notes file
 
 Do **not** delete the library dir. It is the artifact.
+
+## Slides mode (`--slides`)
+
+For lecture/seminar videos where the speaker presents slides, add `--slides`:
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "<source>" --slides
+```
+
+This captures **every unique slide** (page 1 → last): downloads 720p, detects slide
+changes on the slide region (excluding the presenter cam + burned-in caption),
+deduplicates near-identical frames, and extracts at native 720p.
+
+- `--cam-corner {tr,tl,br,bl,none}` (default `tr`) — which corner the presenter cam occupies; `none` if there is no cam.
+- `--caption {bottom,top,none}` (default `bottom`) — burned-in caption band to ignore; `none` if there are no captions.
+- `--hi-res` — download 1080p (only for decks with very small text).
+- `--phash-dist N` (default 4) — dedup aggressiveness; lower keeps more near-duplicates.
+- `--slides` **cannot** be combined with `--start`/`--end` in v1 (the script errors out).
+
+**Reading slides-mode output:** treat **one slide = one section** — every extracted frame
+is a distinct slide, so there is no floor/detected distinction to reason about. The stdout
+prints `slides_extracted: N` and may print `review: near-dup t=A ~ t=B (dist D)` lines:
+these are borderline pairs the tool deliberately **kept** rather than risk dropping a real
+slide. Glance at both frames and merge them in your notes only if they are genuinely the
+same slide. Frames are ordered by timestamp = deck order. Use the same Notes template
+below, with each slide as a `### [t=MM:SS]` section.
 
 ## Notes template (non-negotiable structure)
 

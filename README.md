@@ -1,5 +1,9 @@
 # claude-watch
 
+> **Fork note:** This fork (`stepbyjason-lab/claude-watch`) adds a `--slides` mode for
+> capturing lecture-deck slides. See `docs/specs/2026-06-04-slides-mode-design.md`
+> and `docs/plans/2026-06-04-slides-mode.md`. Upstream: `devinilabs/claude-watch`.
+
 **Turn any tutorial or lecture video into structured study notes.** Paste a URL, walk away, come back to a markdown file with embedded screenshots, timestamped transcript, and Claude's synthesis — saved to a persistent library.
 
 ```
@@ -38,9 +42,12 @@
 /claude-watch ~/Lectures/cs231n.mp4 backpropagation derivation
 /claude-watch https://youtu.be/<long> --start 5:00 --end 25:00
 /claude-watch <url> --resolution 1024            # for slides with tiny code text
+/claude-watch <url> --slides                     # lecture-deck mode
 ```
 
 Flags: `--start/--end`, `--max-frames`, `--resolution`, `--scene-threshold`, `--max-gap`, `--whisper groq|openai`, `--no-whisper`, `--out-dir`.
+
+Slides flags: `--slides`, `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`.
 
 ## Bring your own keys
 

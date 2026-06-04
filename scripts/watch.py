@@ -207,8 +207,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # ---- Stage 2: download ----
     src_dir = work / "source"
-    if cached and (src_dir.glob("video.*")):
-        video = next(iter(src_dir.glob("video.*")))
+    cached_videos = list(src_dir.glob("video.*"))
+    if cached and cached_videos:
+        video = cached_videos[0]
     else:
         if meta["is_url"]:
             video = download_mod.download_video(

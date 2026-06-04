@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import subprocess
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 
 from scripts import frames as frames_mod
@@ -27,8 +28,10 @@ def build_crop_vf(
     cap_frac: float = 0.15,
 ) -> str:
     """Return an ffmpeg crop filter for the slide region, ending with a comma."""
-    assert cam_corner in VALID_CAM, f"bad cam_corner: {cam_corner!r}"
-    assert caption in VALID_CAPTION, f"bad caption: {caption!r}"
+    if cam_corner not in VALID_CAM:
+        raise ValueError(f"bad cam_corner: {cam_corner!r}")
+    if caption not in VALID_CAPTION:
+        raise ValueError(f"bad caption: {caption!r}")
 
     x0, x1, y0, y1 = 0, w, 0, h
 
@@ -100,9 +103,19 @@ def phash_dedup(
     crop_vf: str,
     drop_dist: int = 4,
     flag_dist: int = 10,
-    hash_fn=ahash,
+    hash_fn: Callable[[Path, str], int] = ahash,
 ) -> tuple[list[dict], list[tuple[float, float, int]]]:
-    """Drop only near-identical consecutive frames; keep and flag borderline pairs."""
+    """Drop frames near-identical to the last KEPT frame; keep and flag borderline pairs.
+
+    `flag_dist` must be > `drop_dist`. Otherwise borderline frames
+    (drop_dist < distance <= flag_dist) would be silently dropped instead of
+    flagged, breaking the high-recall guarantee.
+    """
+    if flag_dist <= drop_dist:
+        raise ValueError(
+            f"flag_dist ({flag_dist}) must be > drop_dist ({drop_dist}); "
+            "otherwise borderline frames are silently dropped instead of flagged"
+        )
     kept: list[dict] = []
     flagged: list[tuple[float, float, int]] = []
     last_hash: int | None = None

@@ -30,7 +30,7 @@ def test_crop_none_none_is_full_frame():
 
 
 def test_crop_rejects_invalid_enum():
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         build_crop_vf(1280, 720, cam_corner="middle", caption="bottom")
 
 
@@ -156,6 +156,19 @@ def test_dedup_keeps_clearly_distinct_without_flag():
     )
     assert [r["t"] for r in kept] == [0.0, 1.0]
     assert flagged == []
+
+
+def test_dedup_rejects_flag_dist_not_greater_than_drop_dist():
+    # flag_dist <= drop_dist would silently drop borderline frames instead of
+    # flagging them — the function must refuse this configuration.
+    with pytest.raises(ValueError):
+        phash_dedup(
+            _records([0, 1]),
+            crop_vf="",
+            drop_dist=5,
+            flag_dist=4,
+            hash_fn=lambda p, c: 0,
+        )
 
 
 @pytest.mark.integration
