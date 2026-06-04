@@ -146,7 +146,7 @@ Four review lenses run on the committed implementation. **No CRITICAL, no exploi
 - Network regression (`tests/test_slides_regression.py`, harness deck `5buNm0pA1mg`, expect ~24–40 unique slides) is **gated** behind `@pytest.mark.network` + `CW_RUN_NETWORK=1` so routine runs aren't broken.
 - New/updated tests: crop builder + `ValueError`, hamming, dedup (+ `flag_dist<=drop_dist` guard), format selector, slug (default=upstream hash / slides=full profile / per-flag bust), native extract, scheme allowlist (incl. `x://` rejection), focus×slides conflict, `detect_slides` integration + candidate-cap.
 
-> Note: run pytest from the canonical-case path `D:\Code\_tools\claude-watch` (capital `C`). Running from lowercase `d:\code\…` makes one `test_resolve` assertion fail on a path-casing mismatch (Windows path-casing artifact, not a bug).
+> Note: run pytest from the repository root. On Windows (case-insensitive filesystem), invoking pytest via a path whose drive/directory casing differs from the real folder makes one `test_resolve` assertion fail on a path-casing mismatch — a Windows path-casing artifact, not a bug.
 
 ---
 
@@ -176,5 +176,3 @@ Open options:
 1. Push to fork origin (`git push -u origin feat/slides-mode`).
 2. Open a PR to upstream `devinilabs/claude-watch`.
 3. Address the deferred items (single-pass dump, batch-hash, containment guard cleanup) in a follow-up.
-
-MemKraft entity: `claude-watch-slides-fork`.

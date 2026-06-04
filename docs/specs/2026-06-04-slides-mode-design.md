@@ -1,7 +1,7 @@
 # claude-watch `--slides` 모드 설계 스펙 (2026-06-04)
 
 > 상태: **설계 v2 — 사용자 승인 완료(2026-06-04).** 다음 단계: 구현 계획(plan) 문서 → 코드.
-> 작업 위치: **fork `github.com/stepbyjason-lab/claude-watch`** (upstream: devinilabs/claude-watch), 로컬 `d:\code\_tools\claude-watch`, 브랜치 `feat/slides-mode`. 본 파일이 **canonical 스펙**(초안 `~/.claude/plans/...`는 사본).
+> 작업 위치: fork `github.com/stepbyjason-lab/claude-watch` (upstream: `devinilabs/claude-watch`), 브랜치 `feat/slides-mode`. 본 파일이 canonical 스펙.
 > ⚠️ **§8(리뷰 반영 v2)이 authoritative** — §2~§6의 원안과 충돌하면 §8을 따른다.
 
 ---
