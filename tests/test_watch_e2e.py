@@ -5,8 +5,42 @@ from pathlib import Path
 
 import pytest
 
+from scripts.watch import _scheme_ok, _validate_slides_args, _validate_slides_focus
+
 ROOT = Path(__file__).parent.parent
 FIXTURE = ROOT / "tests" / "fixtures" / "sample_10s.mp4"
+
+
+def test_scheme_ok_allows_http_and_local_rejects_other_schemes():
+    assert _scheme_ok("https://youtu.be/x")
+    assert _scheme_ok("http://x")
+    assert _scheme_ok("/local/path.mp4")
+    assert _scheme_ok(r"D:\videos\lecture.mp4")
+    assert _scheme_ok("C:/videos/x.mp4")
+    assert _scheme_ok("video.mp4")
+    assert not _scheme_ok("file:///etc/passwd")
+    assert not _scheme_ok("ftp://x/y")
+    assert not _scheme_ok("rtmp://x/y")
+    assert not _scheme_ok("data:text/plain,x")
+    assert not _scheme_ok("x://evil")
+    assert not _scheme_ok("z://host/file")
+
+
+def test_validate_rejects_slides_with_focus():
+    with pytest.raises(SystemExit):
+        _validate_slides_focus(slides=True, focus=(10.0, 20.0))
+    _validate_slides_focus(slides=True, focus=None)
+    _validate_slides_focus(slides=False, focus=(1.0, 2.0))
+
+
+def test_validate_slides_args_threshold_range():
+    with pytest.raises(SystemExit):
+        _validate_slides_args(scene_threshold=1.5, phash_dist=5)
+    with pytest.raises(SystemExit):
+        _validate_slides_args(scene_threshold=0.0, phash_dist=5)
+    with pytest.raises(SystemExit):
+        _validate_slides_args(scene_threshold=0.1, phash_dist=99)
+    _validate_slides_args(scene_threshold=0.1, phash_dist=5)
 
 
 @pytest.mark.integration
@@ -43,3 +77,33 @@ def test_watch_end_to_end_on_local_fixture(tmp_path):
     # Stdout should contain the structured manifest block
     assert "=== claude-watch manifest ===" in proc.stdout
     assert "library_dir:" in proc.stdout
+
+
+@pytest.mark.integration
+def test_watch_slides_end_to_end_on_local_fixture(tmp_path):
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "watch.py"),
+            str(FIXTURE),
+            "--no-whisper",
+            "--slides",
+            "--cam-corner", "none",
+            "--caption", "none",
+            "--out-dir", str(tmp_path),
+        ],
+        capture_output=True, text=True, encoding="utf-8", check=False, cwd=str(ROOT),
+    )
+    assert proc.returncode == 0, f"watch.py failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert "slides_extracted:" in proc.stdout
+
+    library_dirs = list(tmp_path.glob("*"))
+    assert len(library_dirs) == 1, f"expected one library dir, got {library_dirs}"
+    lib = library_dirs[0]
+    manifest = json.loads((lib / "manifest.json").read_text())
+    assert manifest["meta"]["mode"] == "slides"
+    assert manifest["meta"]["dl_resolution"] == "720p"
+    assert manifest["frames"]
+    assert all(frame["path"].startswith("frames/") for frame in manifest["frames"])
+    for frame in manifest["frames"]:
+        assert (lib / frame["path"]).exists()
