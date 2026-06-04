@@ -20,12 +20,24 @@ def sanitize_title(title: str) -> str:
 
 
 def slug_for(meta: dict) -> str:
-    """`YYYY-MM-DD-<sanitized-title>-<short-hash>` where hash = sha1(source + focus)[:4]."""
+    """Return a stable library slug.
+
+    Default mode keeps the upstream hash exactly (source + focus). Slides mode
+    folds the full detection profile into the hash so any flag change gets a
+    fresh library directory.
+    """
     date = meta.get("watched_at") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     title = sanitize_title(meta.get("title", "untitled"))
     src = meta.get("source", "")
     focus = meta.get("focus_range_str", "")
-    h = hashlib.sha1((src + "|" + focus).encode("utf-8")).hexdigest()[:4]
+    mode = meta.get("mode", "default")
+    if mode == "default":
+        key = src + "|" + focus
+    else:
+        res = meta.get("dl_resolution", "best")
+        profile = meta.get("slides_profile", "")
+        key = "|".join([src, focus, mode, res, profile])
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:4]
     return f"{date}-{title}-{h}"
 
 

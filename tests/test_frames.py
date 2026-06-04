@@ -20,6 +20,20 @@ def test_format_filename_handles_subsecond_t():
     assert format_filename(1, 3.6) == "0001_t00-04.jpg"
 
 
+def test_extract_frames_native_omits_scale_filter(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(cmd, check, capture_output):
+        calls.append(cmd)
+
+    monkeypatch.setattr("scripts.frames.subprocess.run", fake_run)
+    scenes = [Scene(t=1.0, score=1.0, kind="detected")]
+    extract_frames(FIXTURE, scenes, out_dir=tmp_path, width_px=64, native=True)
+    cmd = calls[0]
+    assert "-vf" not in cmd
+    assert "-protocol_whitelist" in cmd
+
+
 @pytest.mark.integration
 def test_extract_frames_writes_one_jpeg_per_scene(tmp_path):
     scenes = [

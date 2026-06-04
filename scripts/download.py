@@ -6,14 +6,28 @@ import subprocess
 from pathlib import Path
 
 
-def download_video(url: str, out_dir: Path, *, basename: str = "video") -> Path:
+_FORMATS = {
+    "best": "best[ext=mp4]/best",
+    "720p": "bv*[height<=720]+ba/b[height<=720]/best",
+    "1080p": "bv*[height<=1080]+ba/b[height<=1080]/best",
+}
+
+
+def format_selector(fmt: str) -> str:
+    """Map an internal format enum to a yt-dlp selector."""
+    return _FORMATS.get(fmt, _FORMATS["best"])
+
+
+def download_video(
+    url: str, out_dir: Path, *, basename: str = "video", fmt: str = "best"
+) -> Path:
     """Download to `out_dir/<basename>.<ext>` via yt-dlp. Returns the downloaded file."""
     out_dir.mkdir(parents=True, exist_ok=True)
     template = str(out_dir / f"{basename}.%(ext)s")
     cmd = [
         "yt-dlp",
         "--no-playlist",
-        "-f", "best[ext=mp4]/best",
+        "-f", format_selector(fmt),
         "-o", template,
         url,
     ]

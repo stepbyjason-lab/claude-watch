@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 
 from scripts.library import (
@@ -37,6 +38,71 @@ def test_slug_differs_for_different_focus_range():
     }
     other = dict(base, focus_range_str="5:00-8:00")
     assert slug_for(base) != slug_for(other)
+
+
+def test_slug_differs_for_slides_mode():
+    base = {
+        "title": "L",
+        "source": "https://x",
+        "watched_at": "2026-05-03",
+        "focus_range_str": "",
+    }
+    slides = dict(base, mode="slides", dl_resolution="720p")
+    assert slug_for(base) != slug_for(slides)
+
+
+def test_slug_differs_for_resolution():
+    a = {
+        "title": "L",
+        "source": "https://x",
+        "watched_at": "2026-05-03",
+        "focus_range_str": "",
+        "mode": "slides",
+        "dl_resolution": "720p",
+    }
+    b = dict(a, dl_resolution="1080p")
+    assert slug_for(a) != slug_for(b)
+
+
+def test_slug_default_mode_unchanged_when_fields_absent():
+    bare = {
+        "title": "L",
+        "source": "https://x",
+        "watched_at": "2026-05-03",
+        "focus_range_str": "",
+    }
+    explicit = dict(bare, mode="default", dl_resolution="best", slides_profile="")
+    assert slug_for(bare) == slug_for(explicit)
+
+
+def test_slug_default_mode_matches_upstream_hash():
+    meta = {
+        "title": "L",
+        "source": "https://x",
+        "watched_at": "2026-05-03",
+        "focus_range_str": "",
+    }
+    expected = hashlib.sha1(("https://x" + "|" + "").encode("utf-8")).hexdigest()[:4]
+    assert slug_for(meta).endswith("-" + expected)
+
+
+def test_slug_busts_on_any_slides_flag_change():
+    a = {
+        "title": "L",
+        "source": "https://x",
+        "watched_at": "2026-05-03",
+        "focus_range_str": "",
+        "mode": "slides",
+        "dl_resolution": "720p",
+        "slides_profile": "tr|bottom|0.1|20|4|10",
+    }
+    for changed in (
+        "tl|bottom|0.1|20|4|10",
+        "tr|top|0.1|20|4|10",
+        "tr|bottom|0.2|20|4|10",
+        "tr|bottom|0.1|20|6|12",
+    ):
+        assert slug_for(a) != slug_for(dict(a, slides_profile=changed))
 
 
 def test_slug_format_is_date_title_hash():

@@ -1,7 +1,17 @@
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from scripts.download import download_video, copy_local
+from scripts.download import download_video, copy_local, format_selector
+
+
+def test_format_selector_known_enums():
+    assert format_selector("best") == "best[ext=mp4]/best"
+    assert format_selector("720p") == "bv*[height<=720]+ba/b[height<=720]/best"
+    assert format_selector("1080p") == "bv*[height<=1080]+ba/b[height<=1080]/best"
+
+
+def test_format_selector_unknown_falls_back_to_best():
+    assert format_selector("4k") == "best[ext=mp4]/best"
 
 
 @patch("scripts.download.subprocess.run")
@@ -15,6 +25,7 @@ def test_download_video_invokes_yt_dlp_with_target_path(mock_run, tmp_path):
     assert result == expected
     cmd = mock_run.call_args[0][0]
     assert cmd[0] == "yt-dlp"
+    assert cmd[cmd.index("-f") + 1] == "best[ext=mp4]/best"
     assert "-o" in cmd
     out_template_idx = cmd.index("-o") + 1
     assert "video.%(ext)s" in cmd[out_template_idx]

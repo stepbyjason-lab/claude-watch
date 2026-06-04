@@ -21,10 +21,12 @@ def extract_frames(
     *,
     out_dir: Path,
     width_px: int = 512,
+    native: bool = False,
 ) -> list[dict]:
     """For each scene, run a single-frame ffmpeg seek + extract.
 
     Returns: [{"index": int, "t": float, "path": str (relative to out_dir), "kind": str}]
+    If native is true, no scale filter is applied.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
@@ -39,10 +41,14 @@ def extract_frames(
             "-loglevel", "error",
             "-nostdin",
             "-y",
+            "-protocol_whitelist", "file",
             "-ss", f"{scene.t:.3f}",
             "-i", str(video),
             "-frames:v", "1",
-            "-vf", f"scale={width_px}:-2",
+        ]
+        if not native:
+            cmd += ["-vf", f"scale={width_px}:-2"]
+        cmd += [
             "-q:v", "3",  # JPEG quality (2 best, 31 worst); 3 is a good balance
             str(out_path),
         ]
