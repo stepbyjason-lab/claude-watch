@@ -5,10 +5,20 @@ from scripts.scenes import (
     apply_coverage_floor,
     apply_budget_cap,
     detect_scenes,
+    _build_scene_vf,
     Scene,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_10s.mp4"
+
+
+def test_build_scene_vf_default_has_no_prefilter():
+    assert _build_scene_vf(0.30, "") == "select='gt(scene,0.3)',showinfo,metadata=print"
+
+
+def test_build_scene_vf_prepends_prefilter():
+    vf = _build_scene_vf(0.10, "crop=100:100:0:0,")
+    assert vf == "crop=100:100:0:0,select='gt(scene,0.1)',showinfo,metadata=print"
 
 
 def test_apply_coverage_floor_inserts_at_max_gap_intervals():

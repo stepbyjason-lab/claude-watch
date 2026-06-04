@@ -24,7 +24,12 @@ _METADATA_RX = re.compile(
 )
 
 
-def detect_scenes(video: Path, threshold: float = 0.30) -> list[Scene]:
+def _build_scene_vf(threshold: float, prefilter: str = "") -> str:
+    """Build the ffmpeg -vf scene-detection chain."""
+    return f"{prefilter}select='gt(scene,{threshold})',showinfo,metadata=print"
+
+
+def detect_scenes(video: Path, threshold: float = 0.30, *, prefilter: str = "") -> list[Scene]:
     """Run ffmpeg scene-detect filter, parse pts_time + scene scores from stderr.
 
     Always emits a synthetic Scene at t=0 (kind="detected", score=1.0) so the first
@@ -38,8 +43,9 @@ def detect_scenes(video: Path, threshold: float = 0.30) -> list[Scene]:
         "ffmpeg",
         "-hide_banner",
         "-nostats",
+        "-protocol_whitelist", "file",
         "-i", str(video),
-        "-vf", f"select='gt(scene,{threshold})',showinfo,metadata=print",
+        "-vf", _build_scene_vf(threshold, prefilter),
         "-f", "null",
         "-",
     ]
