@@ -1,8 +1,8 @@
 # claude-watch
 
-> **Fork note:** This fork (`stepbyjason-lab/claude-watch`) adds a `--slides` mode for
-> capturing lecture-deck slides. See `docs/specs/2026-06-04-slides-mode-design.md`
-> and `docs/plans/2026-06-04-slides-mode.md`. Upstream: `devinilabs/claude-watch`.
+> **This is a fork** of [`devinilabs/claude-watch`](https://github.com/devinilabs/claude-watch)
+> that adds a **`--slides` mode** for capturing every slide of a lecture deck, plus a
+> **concept-first note contract**. Classic extraction and existing caches are unchanged. → [**Changes in this fork**](#changes-in-this-fork)
 
 **Turn any tutorial or lecture video into structured study notes.** Paste a URL, walk away, come back to a markdown file with embedded screenshots, timestamped transcript, and Claude's synthesis — saved to a persistent library.
 
@@ -23,17 +23,49 @@
 1. Downloads via `yt-dlp` (or accepts a local file).
 2. Detects scene changes with `ffmpeg`. Inserts coverage-floor frames every 45s across long static gaps so a lecture with one slide for 5 minutes still gets ~7 frames, not 1.
 3. Pulls a timestamped transcript — captions first (free), Whisper API (Groq preferred, OpenAI alt) only when missing.
-4. Hands frames + transcript to Claude. Claude `Read`s every frame as an image and writes `notes.md` to a strict template:
-   - `## TLDR` — 3-4 sentence synthesis
-   - `## Key Concepts` — bulleted with timestamps
-   - `## Notes` — one section per scene with embedded screenshot, on-screen text, what was said, Claude's synthesis
-   - `## Code & Commands` — every code-on-screen frame transcribed into a runnable fenced block
-   - `## Diagrams Referenced`, `## Open Questions`
+4. Hands frames + transcript to Claude as raw evidence. Claude `Read`s every frame and writes `notes.md` as a **concept-first study document** — not a screen-by-screen log:
+   - `## TLDR` + `## Core Thesis` — the main argument and why it matters
+   - `## Concept Map` — concepts with timestamped evidence
+   - `## Learning Path` — concepts/claims/frameworks explained, with inline screenshot evidence and captions
+   - `## Frameworks…`, `## Examples and Applications`, `## Caveats and Open Questions`
+   - `## Code & Commands` — code-on-screen transcribed into runnable blocks
+   - `## Slide Coverage Ledger` — every extracted slide/scene accounted for with `[t]` + frame links
 5. Saves everything to `~/claude-watch/library/<slug>/` — re-running the same URL is a cache hit.
 
 ## Why this exists
 
 `claude-video`'s uniform frame sampling spends the budget poorly on long lectures with slow-changing slides. And answers live in chat, so you can't go back to "the notes from that video." `claude-watch` is opinionated for the tutorial workflow: scene-aware frames, persistent library, structured notes file.
+
+## Changes in this fork
+
+This fork (`stepbyjason-lab/claude-watch`) adds a **`--slides` mode** on top of upstream
+`devinilabs/claude-watch`. Classic **extraction and caching are unchanged** (the `--slides`
+flag and its pipeline are purely additive). The note-writing contract is now **concept-first**
+for every mode — see [Note quality](#note-quality).
+
+**New — `--slides`: capture every unique slide of a lecture deck.**
+- Crops out the presenter cam + burned-in caption, then scene-detects on the *slide region* at
+  a low threshold — so slide→slide changes the whole-frame detector misses are caught.
+- A tight coverage floor plus a conservative **perceptual-hash dedup** (zero new dependencies —
+  the 8×8 average hash is computed via `ffmpeg`): near-identical frames are dropped, but
+  borderline pairs are **kept and flagged**, not silently merged (high recall — never miss a slide).
+- Downloads 720p and extracts at native resolution; `--hi-res` for tiny-text decks.
+- New flags: `--slides`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`.
+
+**Supporting changes (additive / backward-compatible):**
+- `slug_for`: slides runs fold their full detection profile into the cache key, so changing any
+  slide flag re-runs cleanly. **Default-mode slugs hash identically to upstream — existing caches keep hitting.**
+- `detect_scenes` gains one optional `prefilter=` kwarg (default `""` → byte-identical output).
+- `extract_frames` gains a `native=` option; `download_video` gains an enum `fmt=` selector (default unchanged).
+- All `ffmpeg` inputs add `-protocol_whitelist file`; the source URL scheme is allow-listed (http/https/local only).
+- `watch.py` forces UTF-8 stdout/stderr so non-ASCII output doesn't crash on legacy Windows codepages (e.g. cp949).
+
+**Design & review trail:** [design spec](docs/specs/2026-06-04-slides-mode-design.md) ·
+[TDD plan](docs/plans/2026-06-04-slides-mode.md) ·
+[implementation + multi-lens review log](docs/2026-06-04-slides-mode-implementation-log.md).
+Run the suite with `python -m pytest -m "not network"`.
+
+*Offered for upstreaming — happy to open a PR if it's useful to the project.*
 
 ## Usage
 
@@ -48,6 +80,12 @@
 Flags: `--start/--end`, `--max-frames`, `--resolution`, `--scene-threshold`, `--max-gap`, `--whisper groq|openai`, `--no-whisper`, `--out-dir`.
 
 Slides flags: `--slides`, `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`.
+
+## Note quality
+
+claude-watch extracts frames and transcript, but the final note should not be a screen-by-screen log. The skill now asks the agent to produce concept-first study notes: core thesis, concept map, frameworks, examples, applications, caveats, inline visual evidence, and a slide coverage ledger with timestamped frame references.
+
+Use the scene/slide timeline as evidence, not as the main structure. For slide lectures, `--slides` should preserve every unique prepared slide; the note should account for those slides in the ledger and group them by concept rather than dropping them or listing them as one-slide-per-section.
 
 ## Bring your own keys
 
