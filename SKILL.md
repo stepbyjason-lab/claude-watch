@@ -1,6 +1,6 @@
 ---
 name: claude-watch
-description: Watch a tutorial or lecture video (URL or local path) and produce structured study notes. Downloads with yt-dlp, detects scene changes with ffmpeg, pulls a timestamped transcript (captions or Whisper API fallback), and writes a section-by-section markdown notes file with embedded screenshots to ~/claude-watch/library/<slug>/.
+description: Watch a tutorial or lecture video (URL or local path) and produce concept-first study notes. Downloads with yt-dlp, detects scene or slide changes with ffmpeg, pulls a timestamped transcript (captions or Whisper API fallback), and writes synthesized markdown notes with inline visual evidence and timestamped traceability to ~/claude-watch/library/<slug>/.
 argument-hint: "<video-url-or-path> [topic-or-question]"
 allowed-tools: Bash, Read, Write, AskUserQuestion
 homepage: https://github.com/devinilabs/claude-watch
@@ -66,7 +66,16 @@ Optional flags:
 
 **Step 4 — load the transcript.** The `=== transcript ===` block points to `transcript.json` (or `transcript.window.json` for focused mode). `Read` it — it's a list of `{t_start, t_end, text, speaker_break}`.
 
-**Step 5 — write `notes.md` to the library directory.** Use the **strict template** below. Save to `<library_dir>/notes.md`. Then print a 3-line summary to chat:
+**Step 4.5 — choose the note mode.** Classify the video before drafting:
+
+- **Slide lecture / seminar:** use `--slides` when possible; preserve every unique prepared slide, then group slides by concept in the notes.
+- **Conceptual talk without slides:** organize by thesis, concepts, arguments, examples, caveats, and applications.
+- **Code walkthrough:** organize by implementation milestones, intent, design decisions, reusable patterns, and caveats.
+- **Product / UI demo:** organize by workflow or feature area, with screenshots explaining UI states and decisions.
+
+This classification affects note structure only. It does not change the already-extracted raw evidence.
+
+**Step 5 — write `notes.md` to the library directory.** Use the **concept-first study notes contract** below. The frames and transcript are raw evidence; your job is to synthesize them into a learning document. Save to `<library_dir>/notes.md`. Then print a 3-line summary to chat:
 1. Title and slug
 2. Number of sections + key concepts
 3. Path to the notes file
@@ -91,15 +100,17 @@ deduplicates near-identical frames, and extracts at native 720p.
 - `--phash-dist N` (default 4) — dedup aggressiveness; lower keeps more near-duplicates.
 - `--slides` **cannot** be combined with `--start`/`--end` in v1 (the script errors out).
 
-**Reading slides-mode output:** treat **one slide = one section** — every extracted frame
-is a distinct slide, so there is no floor/detected distinction to reason about. The stdout
-prints `slides_extracted: N` and may print `review: near-dup t=A ~ t=B (dist D)` lines:
-these are borderline pairs the tool deliberately **kept** rather than risk dropping a real
-slide. Glance at both frames and merge them in your notes only if they are genuinely the
-same slide. Frames are ordered by timestamp = deck order. Use the same Notes template
-below, with each slide as a `### [t=MM:SS]` section.
+**Reading slides-mode output:** read every extracted slide, preserve every unique prepared slide, but do **not** make "one slide = one section" the default note structure. Frames are ordered by timestamp = deck order, and `slides_extracted: N` tells you how many distinct slides were captured. Use the slides as evidence, then group adjacent slides into the concepts, claims, frameworks, examples, or caveats they support.
 
-## Notes template (non-negotiable structure)
+Completeness and structure are separate: `--slides` protects coverage; concept-first writing protects learning quality. Do not drop prepared slides just to avoid a chronological-looking note. Instead, move each slide under the concept it supports and use an evidence caption that explains what the slide proves or exemplifies.
+
+The stdout may print `review: near-dup t=A ~ t=B (dist D)` lines. These are borderline pairs the tool deliberately **kept** rather than risk dropping a real slide. Glance at both frames and merge their evidence only if they are genuinely the same slide.
+
+## Notes template (concept-first study notes contract)
+
+The default output is **not** a scene-by-scene screen log. Read every frame and transcript segment, then reorganize the video into a study document. The prose should teach the core thesis and concepts; screenshots should appear inline where they prove, illustrate, or clarify the idea.
+
+For slide lectures, account for every unique prepared slide captured by `--slides`. Group slides by concept; do not drop slides just to make the note less chronological. Avoid duplicate embeds: if a slide is embedded inline, the coverage ledger can reference it without embedding it again.
 
 ````markdown
 # <Video Title>
@@ -107,29 +118,46 @@ below, with each slide as a `### [t=MM:SS]` section.
 **Source:** <URL or path>  ·  **Duration:** MM:SS  ·  **Watched:** YYYY-MM-DD
 
 ## TLDR
-<3-4 sentences: what the video is about and the single most important takeaway.>
+<3-5 sentences: the core thesis, why it matters, and the most useful takeaway.>
 
-## Key Concepts
-- **<concept>** — <one-line definition> · `[t=MM:SS]`
-- ...
+## Core Thesis
+<The main argument or lesson of the video in plain language.>
 
-## Notes
+## Concept Map
+- **<concept>** — <definition and why it matters> · Evidence: `[t=MM:SS]`
+- **<concept>** — <definition and relationship to another concept> · Evidence: `[t=MM:SS]`
 
-### [t=00:04] <Section title you derive from on-screen + spoken content>
+## Learning Path
+
+### <Concept / claim / framework name>
+
+<Explain the idea. Start from what the speaker is teaching, not from what appears on screen.>
 
 ![](frames/0001_t00-04.jpg)
 
-**On screen:** <Transcribe / describe the slide, code, diagram. If code, transcribe verbatim.>
+**Evidence caption:** <What this frame proves, illustrates, contrasts, or makes concrete. Do not merely describe what is visible.>
 
-**Said:** <Relevant transcript excerpt for this scene, lightly cleaned.>
+**Why it matters:** <Practical or strategic importance.>
 
-**Synthesis:** <Your connection — what this section is teaching, how it links to prior section.>
+**How to apply it:** <Concrete usage guidance, checklist, or decision rule.>
 
-### [t=00:31] <next section>
+**Traceability:** `[t=MM:SS]`; transcript segment `<short excerpt or paraphrase>`.
+
+**Additional supporting slides:** `[t=MM:SS]` `frames/0002_t00-31.jpg`; `[t=MM:SS]` `frames/0003_t01-12.jpg`. <Use this when multiple slides support the same concept but do not all need inline embeds.>
+
+<The Slide Coverage Ledger is the single source of truth for slide accounting. `Additional supporting slides` is only a convenience pointer inside a concept section; it must not replace or duplicate ledger accounting.>
+
+### <Next concept / claim / framework name>
 ...
 
+## Frameworks, Methods, and Decision Rules
+- **<framework>** — <steps, when to use it, when not to use it> · Evidence: `[t=MM:SS]`
+
+## Examples and Applications
+- **<example>** — <what it demonstrates and how to reuse it> · Evidence: `[t=MM:SS]`
+
 ## Code & Commands
-<every code-on-screen frame's content as a runnable fenced block, language-tagged, with [t=MM:SS] back-link>
+<Every important code-on-screen frame's content as a runnable fenced block, language-tagged, with [t=MM:SS] back-link. Omit this section if no code appears.>
 
 ```python
 # [t=03:45]
@@ -137,21 +165,48 @@ def forward(x):
     return x @ W + b
 ```
 
-## Diagrams Referenced
-- `[t=02:10]` — <one-line description of the diagram in frame 0008>
-- ...
+## Caveats and Open Questions
+- <Things mentioned but not fully covered, risks, assumptions, or follow-ups.>
 
-## Open Questions
-- <things mentioned but not fully covered, or follow-ups to explore>
+## Slide Coverage Ledger
+
+<Recommended for slide lectures and dense demos. Use this to prove coverage and traceability, not as the main narrative. If using `--slides`, every unique prepared slide should be accounted for exactly once as either `inline` or `ledger`. For long decks, prefer reference-only ledger rows instead of embedding every image.>
+
+| Time | Frame | Status | Supports |
+|---|---|---|---|
+| `[t=00:04]` | `frames/0001_t00-04.jpg` | inline | <concept/claim this embedded frame supports> |
+| `[t=00:31]` | `frames/0002_t00-31.jpg` | ledger | <concept/claim this non-embedded slide supports> |
+
+### Optional Embedded Ledger Detail
+
+Use this only for short decks or visually critical slides that were not already embedded inline.
+
+![](frames/0002_t00-31.jpg)
+
+**Evidence caption:** <What this visual supports; avoid pure screen description.>
+
+**Transcript anchor:** <Relevant transcript excerpt, lightly cleaned.>
+
+**Supports:** <Which concept/claim this evidence supports.>
 ````
 
-## Rules baked into the template
+## Quality gate before writing `notes.md`
 
-- **One scene = one section.** Use the `t=MM:SS` from each frame as the section anchor.
-- **Adjacent scenes that are clearly the same topic** can be merged. When you do, mention it parenthetically: *(merged scenes at t=02:10 and t=02:42)*
-- **Code blocks must be fenced** with the right language tag, transcribed verbatim from the frame.
-- **The "On screen" block is required even for title slides.** Keeps the structure parallel.
-- **Timestamps are absolute** (real video timeline) — for YouTube sources, a viewer can paste `<URL>&t=<seconds>` to jump there.
+Before finalizing, check the draft against this gate:
+
+- The reader can understand the video's core thesis and concept structure from the prose; screenshots add concrete evidence and detail.
+- Main sections are organized by concepts, claims, workflows, frameworks, examples, or applications — not by timestamp.
+- Screenshots and transcript excerpts are evidence for ideas, not the main narrative. Important visual evidence may appear inline beside the concept it supports.
+- If most paragraphs begin with what is visible on screen, rewrite the note.
+- If old-template fields such as `On screen:` or `Synthesis:` appear in the main note body, rewrite the note using the concept-first contract.
+- If evidence captions or visual descriptions are longer than the teaching prose across most of the document, rewrite the note.
+- If slide titles became section titles without interpretation, rewrite the section titles as claims or lessons.
+- If a section title is only a timestamp or a copied slide title, rewrite it as a concept, claim, workflow, or decision rule.
+- If using `--slides`, verify every unique prepared slide is accounted for exactly once in the Slide Coverage Ledger as either `inline` or `ledger`. Do not reduce slide coverage to avoid a scene-log shape, and do not duplicate image embeds for the same slide.
+- Every major claim has at least one timestamp or frame reference.
+- Code, diagrams, UI states, and slide text are transcribed only when they materially support the learning goal.
+
+If the source is genuinely a linear code walkthrough or UI demo, the main sections may follow the workflow order, but they still must explain intent, design decisions, reusable patterns, and caveats.
 
 ## Re-runs
 
