@@ -28,6 +28,7 @@ from scripts import whisper
 
 
 _WIN_DRIVE_PATH = re.compile(r"^[A-Za-z]:(?:\\|/(?!/))")
+SLIDES_FLAG_DIST_OFFSET = 6
 
 
 def _parse_ts(s: str) -> float:
@@ -78,6 +79,14 @@ def _wipe_frames_dir(frames_dir: Path) -> None:
             f.unlink()
 
 
+def _slides_flag_dist(drop_dist: int) -> int:
+    return drop_dist + SLIDES_FLAG_DIST_OFFSET
+
+
+def _prefix_frame_paths(records: list[dict]) -> list[dict]:
+    return [{**fr, "path": f"frames/{fr['path']}"} for fr in records]
+
+
 def select_scenes(video, meta, args, focus, work, *, cached):
     """Mode-dispatched detect + extract step.
 
@@ -85,7 +94,6 @@ def select_scenes(video, meta, args, focus, work, *, cached):
     library directory and frame files already written.
     """
     frames_dir = work / "frames"
-    frames_dir.resolve().relative_to(lib.LIBRARY_ROOT.resolve())
 
     if args.slides:
         _wipe_frames_dir(frames_dir)
@@ -97,11 +105,11 @@ def select_scenes(video, meta, args, focus, work, *, cached):
             threshold=args.scene_threshold,
             max_gap=min(args.max_gap, 20.0),
             drop_dist=args.phash_dist,
-            flag_dist=args.phash_dist + 6,
+            flag_dist=_slides_flag_dist(args.phash_dist),
             width_px=1280,
             candidate_cap=800,
         )
-        frame_records = [{**fr, "path": f"frames/{fr['path']}"} for fr in result["slides"]]
+        frame_records = _prefix_frame_paths(result["slides"])
         scenes = [{"t": fr["t"], "score": 1.0, "kind": fr["kind"]} for fr in result["slides"]]
         return frame_records, scenes, result["flagged"]
 
@@ -141,7 +149,7 @@ def select_scenes(video, meta, args, focus, work, *, cached):
     raw_frame_records = frames_mod.extract_frames(
         video, capped, out_dir=frames_dir, width_px=args.resolution
     )
-    frame_records = [{**fr, "path": f"frames/{fr['path']}"} for fr in raw_frame_records]
+    frame_records = _prefix_frame_paths(raw_frame_records)
     scenes = [{"t": s.t, "score": s.score, "kind": s.kind} for s in capped]
     return frame_records, scenes, []
 
@@ -201,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{args.scene_threshold}",
             f"{min(args.max_gap, 20.0)}",
             f"{args.phash_dist}",
-            f"{args.phash_dist + 6}",
+            f"{_slides_flag_dist(args.phash_dist)}",
         ])
     else:
         meta["dl_resolution"] = "best"

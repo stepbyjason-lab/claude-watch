@@ -122,9 +122,17 @@ Four review lenses run on the committed implementation. **No CRITICAL, no exploi
 |---|---|
 | `watch.py` prints an en-dash (focus line) and em-dash (final line); on a legacy Windows codepage (**cp949**, Korean) these raise `UnicodeEncodeError` and crash the run *after* frames/transcript are written. Affects **both** classic and slides modes (pre-existing). Surfaced by the e2e tests (only green with `PYTHONUTF8=1`). | `main()` reconfigures `sys.stdout`/`sys.stderr` to UTF-8 (guarded). The e2e suite now passes **without** `PYTHONUTF8`. |
 
+### Post-review polish (this commit)
+
+| Finding | Resolution |
+|---|---|
+| `select_scenes()` had a dead containment check: `frames_dir` is structurally `LIBRARY_ROOT/slug/frames`, and the `relative_to()` result was discarded. | Removed the no-op line. |
+| `args.phash_dist + 6` was duplicated in the detector call and the cache-profile slug. | Centralized it through `SLIDES_FLAG_DIST_OFFSET` + `_slides_flag_dist()` to prevent hash-vs-behavior drift. |
+| Both branches duplicated the `frames/` manifest-path prefix transform. | Centralized it in `_prefix_frame_paths()`. |
+| `hash_fn` accepted `Path` in the type hint, while `detect_slides()` passes absolute paths as strings. | Updated `ahash` and `hash_fn` typing to `str \| Path`. |
+
 ### Acknowledged, not fixed (single-user CLI / out of scope / deferred)
 
-- **Containment guard is a no-op by construction** (`frames_dir` is always under `LIBRARY_ROOT` since `work = LIBRARY_ROOT/slug`) and its `ValueError` is unhandled. On a single-user CLI `--out-dir` is trusted input; the guard is defense-in-depth. (Could be made meaningful or its comment de-emphasized later.)
 - **Single-ffmpeg-pass frame-dump** (0 seeks) — deferred (spec §8.3 ⏸).
 - **`ahash` average-hash collides solid-black vs solid-white** — known naive-aHash limitation; irrelevant for real slides.
 - **Two `ffprobe` spawns** (`probe_dimensions` + `_probe_duration`) could be one — micro-opt.
@@ -134,7 +142,7 @@ Four review lenses run on the committed implementation. **No CRITICAL, no exploi
 
 ## 6. Test status
 
-- **87 tests pass** (as of `6d382e3`) with `pytest -q -m "not network"`, in a default (cp949) shell, **without** `PYTHONUTF8`.
+- **87 tests pass** (verified after post-review polish) with `pytest -q -m "not network"`, in a default (cp949) shell, **without** `PYTHONUTF8`.
 - Network regression (`tests/test_slides_regression.py`, harness deck `5buNm0pA1mg`, expect ~24–40 unique slides) is **gated** behind `@pytest.mark.network` + `CW_RUN_NETWORK=1` so routine runs aren't broken.
 - New/updated tests: crop builder + `ValueError`, hamming, dedup (+ `flag_dist<=drop_dist` guard), format selector, slug (default=upstream hash / slides=full profile / per-flag bust), native extract, scheme allowlist (incl. `x://` rejection), focus×slides conflict, `detect_slides` integration + candidate-cap.
 
@@ -147,11 +155,11 @@ Four review lenses run on the committed implementation. **No CRITICAL, no exploi
 | File | Change |
 |---|---|
 | `scripts/scenes.py` | `detect_scenes(prefilter="")` kwarg + `_build_scene_vf` helper; `-protocol_whitelist file` |
-| `scripts/slides.py` | **new** — `build_crop_vf`, `ahash`/`hamming`, `phash_dedup`, `probe_dimensions`, `_probe_duration`, `detect_slides`, `CandidateCapExceeded` |
+| `scripts/slides.py` | **new** — `build_crop_vf`, `ahash`/`hamming`, `phash_dedup`, `probe_dimensions`, `_probe_duration`, `detect_slides`, `CandidateCapExceeded`; `hash_fn` accepts `str \| Path` |
 | `scripts/download.py` | `format_selector` enum (720p/1080p/best, default byte-identical); `download_video(fmt=)`; `--no-playlist` preserved |
 | `scripts/library.py` | `slug_for` — default=upstream hash, slides=full profile |
 | `scripts/frames.py` | `extract_frames(native=)`; `-protocol_whitelist file` |
-| `scripts/watch.py` | `_scheme_ok` (drive-path regex), `_validate_slides_args`, `_validate_slides_focus`, `_wipe_frames_dir`, `select_scenes` seam, `--slides/--cam-corner/--caption/--hi-res/--phash-dist` flags, `meta['slides_profile']`, download fmt branch, manifest `slides_extracted` + `review:` lines, UTF-8 stdout reconfigure |
+| `scripts/watch.py` | `_scheme_ok` (drive-path regex), `_validate_slides_args`, `_validate_slides_focus`, `_wipe_frames_dir`, `_slides_flag_dist`, `_prefix_frame_paths`, `select_scenes` seam, `--slides/--cam-corner/--caption/--hi-res/--phash-dist` flags, `meta['slides_profile']`, download fmt branch, manifest `slides_extracted` + `review:` lines, UTF-8 stdout reconfigure |
 | `SKILL.md` | Slides-mode section + flag docs + output-reading guidance |
 | `README.md` | Fork note + `--slides` usage example |
 | `tests/test_*.py` | Unit + integration coverage for all of the above |

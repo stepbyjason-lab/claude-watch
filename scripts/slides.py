@@ -64,7 +64,7 @@ def hamming(a: int, b: int) -> int:
     return (a ^ b).bit_count()
 
 
-def ahash(image_path: Path, crop_vf: str = "") -> int:
+def ahash(image_path: str | Path, crop_vf: str = "") -> int:
     """Compute a zero-dependency 64-bit average hash through ffmpeg."""
     vf = f"{crop_vf}scale=8:8,format=gray"
     cmd = [
@@ -103,7 +103,7 @@ def phash_dedup(
     crop_vf: str,
     drop_dist: int = 4,
     flag_dist: int = 10,
-    hash_fn: Callable[[Path, str], int] = ahash,
+    hash_fn: Callable[[str | Path, str], int] = ahash,
 ) -> tuple[list[dict], list[tuple[float, float, int]]]:
     """Drop frames near-identical to the last KEPT frame; keep and flag borderline pairs.
 
