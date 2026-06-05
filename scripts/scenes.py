@@ -81,12 +81,25 @@ def detect_scenes(video: Path, threshold: float = 0.30, *, prefilter: str = "") 
 
 
 def apply_coverage_floor(
-    scenes: list[Scene], duration_s: float, max_gap_s: float
+    scenes: list[Scene],
+    duration_s: float,
+    max_gap_s: float,
+    *,
+    include_tail_anchor: bool = False,
+    tail_eps: float = 0.5,
 ) -> list[Scene]:
     """Insert synthetic floor boundaries every `max_gap_s` across long static gaps.
 
     Uses end-of-video as the right edge so a single boundary at t=5 in a 60s video
     with max_gap=45 yields one floor at t=50.
+
+    The floor steps by `max_gap_s` from each scene with `while t < next_edge`, so the
+    final tail shorter than `max_gap_s` is left uncovered: a slide that appears only in
+    the last few seconds never becomes a candidate. When `include_tail_anchor=True`
+    (slides mode opts in; classic mode does not, staying byte-identical to upstream) a
+    single floor is guaranteed at `duration_s - tail_eps` — an actually-extractable
+    point, not exactly EOF — unless an existing boundary is already within `tail_eps`
+    of it (so a deck that ends on a detected cut is not double-sampled).
     """
     if not scenes:
         return [Scene(t=0.0, score=0.0, kind="floor")]
@@ -102,6 +115,11 @@ def apply_coverage_floor(
             while t < next_edge:
                 out.append(Scene(t=t, score=0.0, kind="floor"))
                 t += max_gap_s
+    if include_tail_anchor:
+        anchor_t = duration_s - tail_eps
+        last_t = max(s.t for s in out)
+        if anchor_t - last_t > tail_eps:
+            out.append(Scene(t=anchor_t, score=0.0, kind="floor"))
     out.sort(key=lambda s: s.t)
     return out
 

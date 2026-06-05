@@ -222,7 +222,12 @@ def detect_slides(
 
     raw = detect_scenes(video, threshold=threshold, prefilter=crop_vf)
     duration_s = _probe_duration(video)
-    floored = apply_coverage_floor(raw, duration_s=duration_s, max_gap_s=max_gap)
+    # Slides mode opts into the end-of-video tail anchor so a slide shown only in the
+    # final seconds (below the scene-detect threshold, past the last floor step) is
+    # still extracted. Classic mode never passes this, preserving upstream behavior.
+    floored = apply_coverage_floor(
+        raw, duration_s=duration_s, max_gap_s=max_gap, include_tail_anchor=True
+    )
     if len(floored) > candidate_cap:
         raise CandidateCapExceeded(
             f"{len(floored)} candidate frames exceeds cap {candidate_cap}; "

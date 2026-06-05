@@ -46,14 +46,16 @@ for every mode — see [Note quality](#note-quality).
 **New — `--slides`: high-recall capture of a lecture deck (aims for every prepared slide).**
 - Crops out the presenter cam + burned-in caption, then scene-detects on the *slide region* at
   a low threshold — so slide→slide changes the whole-frame detector misses are caught.
-- A tight coverage floor plus a conservative **perceptual-hash dedup** (zero new dependencies —
-  the 8×8 difference (edge) hash is computed via `ffmpeg` — an edge hash, not an average
+- A tight coverage floor — with an **end-of-video tail anchor** so a slide shown only in the
+  final seconds (too late to register as a scene cut, past the last coverage step) is still
+  captured — plus a conservative **perceptual-hash dedup** (zero new dependencies —
+  the 9×8 difference (edge) hash is computed via `ffmpeg` — an edge hash, not an average
   hash, so it tells apart monochrome text slides on white decks): near-identical frames are dropped, but
   borderline pairs are **kept and flagged**, not silently merged.
 - Downloads 720p and extracts at native resolution; `--hi-res` for tiny-text decks.
 - New flags: `--slides`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`.
 
-> **High-recall, not exhaustive.** A real run ([dogfood](docs/dogfood/2026-06-05-detailpage-slides.md)) widened coverage well beyond manual sampling, but still missed a *visually-similar* step slide (merged by the dedup) and two *fast-flipped* slides. Keep the transcript as a parallel source; lower `--phash-dist` if similar slides merge.
+> **High-recall, not exhaustive.** Two real runs ([dogfood](docs/dogfood/2026-06-05-detailpage-slides.md), [white-deck validation](docs/dogfood/2026-06-05-harness-dhash-validation.md)) widened coverage well beyond manual sampling; the end-of-video anchor recovers the final slide, and on a 38-min white deck `--scene-threshold 0.15 --phash-dist 2` lifted capture from 25 → 31 slides. *Fast page-flips* and *near-identical build steps* can still merge, so keep the transcript as a parallel source and lower `--scene-threshold` / `--phash-dist` for dense text decks.
 
 **Supporting changes (additive / backward-compatible):**
 - `slug_for`: slides runs fold their full detection profile into the cache key, so changing any

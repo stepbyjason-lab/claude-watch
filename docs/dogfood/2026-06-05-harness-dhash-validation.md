@@ -77,6 +77,50 @@ deck types.
 The `aHash → dHash` change is now validated end-to-end on real footage. No further code change
 required for this item.
 
+## Follow-up: closing the residual missed-slide gap
+
+The first pass reported "~4–5 white-deck transitions not captured." We probed each of the 6
+ground-truth timestamps the default run missed by measuring the dHash distance of a frame at
+that timestamp to the nearest *kept* frame (`D:\Work\_cw-validation\probe_missed.py`):
+
+| missed GT t | dHash dist to nearest kept | reality |
+|---|---|---|
+| 03:00 | **0** (= kept 04:00) | same slide — already captured |
+| 03:45 | **0** (= kept 04:00) | same slide |
+| 18:44 | **1** (= kept 17:54) | build/sub-state, correctly merged |
+| 30:44 | **1** (= kept 29:26) | build/sub-state, correctly merged |
+| 15:44 | **5** (= kept 14:34) | lightly distinct |
+| 37:58 | **21** | genuinely distinct — a real miss |
+
+So **4 of 6 were never real misses** (dist 0–1 = the same slide we already had). Only two are
+real content gaps, and — critically — **neither is recoverable by `--phash-dist`**: a sweep at
+the default threshold gave dist4 = 25, dist2 = 26 (recovers an over-merged slide at 22:57,
+1 flag, no balloon), **dist1 = 37** (over-capture, +12 flags) **yet still missed both**. They
+are missing at the *candidate* stage, not the dedup stage.
+
+**Two levers, by root cause:**
+
+1. **Mid-video lightly-changed slide (15:44)** → lower `--scene-threshold`. Re-run at
+   `--scene-threshold 0.15 --phash-dist 2` → **31 slides, 4 flags**, recovers the 15:44 region;
+   the edge-hash dedup keeps the extra candidates from ballooning. (Recommended deck-specific
+   setting; **not** promoted to the global default.)
+2. **Final slide (37:58)** → *not* a threshold problem (still missed at 0.15, last frame 36:47).
+   It is a structural **end-of-video coverage gap**: `apply_coverage_floor` (`scripts/scenes.py`)
+   steps floors by `max_gap` from the last scene with `while t < duration`, leaving the final
+   ≤`max_gap` (20s) tail uncovered. A slide in that tail is never a candidate under any tuning.
+
+**Fix (slides-only opt-in tail anchor).** `apply_coverage_floor(..., include_tail_anchor=True)`
+guarantees one floor at `duration − 0.5s` (an extractable point, not EOF), skipped if an existing
+boundary is already within `tail_eps`. Slides mode opts in; **classic mode keeps the upstream
+default (`False`)**, so classic notes are byte-identical. Covered by 5 unit tests in
+`tests/test_scenes.py` (tail covered when opted in; skipped near an existing end scene/floor;
+default-False leaves the short tail uncovered).
+
+**Verified.** Default-flag harness re-run after the fix: **25 → 26 slides**, new final frame
+`0117_t38-01.jpg` at **t=38:01** (the previously-missed 37:58 slide, dist 21 from 37:06 = kept),
+**same 3 review flags, zero added noise** — the anchor added exactly one frame: the real final
+slide. The "even the last slide" gap is now closed.
+
 ## Artifacts (local, not committed)
 
 - `D:\Work\_cw-validation\harness\…\frames\` — 25 extracted white-deck slides (54 MB incl. 720p source)

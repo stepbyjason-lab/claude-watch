@@ -43,6 +43,63 @@ def test_apply_coverage_floor_no_op_when_gaps_under_threshold():
     assert all(s.kind == "detected" for s in out)
 
 
+# --- end-of-video tail anchor (slides-mode opt-in) -------------------------------
+# The coverage floor steps by max_gap from the last scene with `while t < duration`,
+# so the final <=max_gap tail is uncovered: a slide that appears only in those last
+# seconds is never extracted as a candidate. `include_tail_anchor=True` (slides mode
+# only) guarantees one floor near duration-eps. Default stays False so classic mode
+# is byte-identical to upstream.
+
+
+def test_tail_anchor_default_false_leaves_short_tail_uncovered():
+    """Default behavior unchanged: a short final tail gets no floor."""
+    scenes = [Scene(t=0.0, score=1.0, kind="detected"), Scene(t=10.0, score=1.0, kind="detected")]
+    out = apply_coverage_floor(scenes, duration_s=12.0, max_gap_s=20.0)
+    assert all(s.kind == "detected" for s in out)
+
+
+def test_tail_anchor_covers_short_final_tail_when_opted_in():
+    """opt-in: final 2s tail (< max_gap) gets a floor at duration-eps so the last
+    slide is extractable."""
+    scenes = [Scene(t=0.0, score=1.0, kind="detected"), Scene(t=10.0, score=1.0, kind="detected")]
+    out = apply_coverage_floor(
+        scenes, duration_s=12.0, max_gap_s=20.0, include_tail_anchor=True
+    )
+    floor_times = [round(s.t, 3) for s in out if s.kind == "floor"]
+    assert floor_times == [11.5]  # duration_s - 0.5
+
+
+def test_tail_anchor_fills_uncovered_tail_after_floor_run():
+    """Realistic case: floors land at 50/95/140/185 then 185->205 (20s) is the
+    uncovered tail; the anchor fills it at 204.5."""
+    scenes = [Scene(t=5.0, score=1.0, kind="detected")]
+    out = apply_coverage_floor(
+        scenes, duration_s=205.0, max_gap_s=45.0, include_tail_anchor=True
+    )
+    floor_times = sorted(round(s.t, 3) for s in out if s.kind == "floor")
+    assert floor_times == [50.0, 95.0, 140.0, 185.0, 204.5]
+
+
+def test_tail_anchor_skips_when_scene_already_near_end():
+    """No duplicate anchor: a detected scene 0.2s before end already covers the tail."""
+    scenes = [Scene(t=0.0, score=1.0, kind="detected"), Scene(t=11.8, score=0.9, kind="detected")]
+    out = apply_coverage_floor(
+        scenes, duration_s=12.0, max_gap_s=20.0, include_tail_anchor=True
+    )
+    assert not [s for s in out if s.kind == "floor"]
+
+
+def test_tail_anchor_skips_when_floor_already_near_end():
+    """Guard also fires against the floor run: a floor at t=50 in a 50.4s video is
+    within tail_eps of duration, so no redundant anchor at 49.9."""
+    scenes = [Scene(t=5.0, score=1.0, kind="detected")]
+    out = apply_coverage_floor(
+        scenes, duration_s=50.4, max_gap_s=45.0, include_tail_anchor=True
+    )
+    floor_times = sorted(round(s.t, 3) for s in out if s.kind == "floor")
+    assert floor_times == [50.0]
+
+
 def test_apply_budget_cap_drops_lowest_scoring_detected_first():
     scenes = [Scene(t=float(i), score=float(i), kind="detected") for i in range(10)]
     out = apply_budget_cap(scenes, max_frames=4)
