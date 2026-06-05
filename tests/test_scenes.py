@@ -100,6 +100,49 @@ def test_tail_anchor_skips_when_floor_already_near_end():
     assert floor_times == [50.0]
 
 
+def test_tail_anchor_default_false_is_structurally_identical_to_classic():
+    """The #1 invariant: omitting the flag (classic mode) yields output *identical* to
+    the explicit default-False call — not merely 'all detected'. Locks byte-for-byte
+    classic behavior against any future regression in the guard block."""
+    scenes = [Scene(t=0.0, score=1.0, kind="detected"), Scene(t=120.0, score=0.9, kind="detected")]
+    classic = apply_coverage_floor(scenes, duration_s=200.0, max_gap_s=45.0)
+    explicit_false = apply_coverage_floor(
+        scenes, duration_s=200.0, max_gap_s=45.0, include_tail_anchor=False
+    )
+    assert classic == explicit_false  # frozen-dataclass structural equality
+
+
+def test_tail_anchor_skipped_when_boundary_exactly_tail_eps_away():
+    """Pins the strict `>` operator: a boundary exactly tail_eps before the anchor
+    (last scene at duration-1.0 → anchor_t-last_t == 0.5 == tail_eps) is NOT anchored.
+    Flipping `>` to `>=` would add a floor here and fail this test."""
+    scenes = [Scene(t=0.0, score=1.0, kind="detected"), Scene(t=11.0, score=0.9, kind="detected")]
+    out = apply_coverage_floor(
+        scenes, duration_s=12.0, max_gap_s=20.0, include_tail_anchor=True
+    )
+    assert not [s for s in out if s.kind == "floor"]
+
+
+def test_tail_anchor_never_emits_negative_timestamp_on_short_video():
+    """Degenerate duration shorter than tail_eps: anchor_t would be negative; the
+    `anchor_t > 0` guard must drop it so no negative seek time reaches ffmpeg."""
+    scenes = [Scene(t=0.0, score=1.0, kind="detected")]
+    out = apply_coverage_floor(
+        scenes, duration_s=0.3, max_gap_s=20.0, include_tail_anchor=True
+    )
+    assert all(s.t >= 0.0 for s in out)
+    assert not [s for s in out if s.kind == "floor"]
+
+
+def test_tail_anchor_empty_scenes_returns_single_zero_floor():
+    """Defensive-contract pin: empty scenes take the early return and ignore the
+    anchor. (The real pipeline never passes empty — detect_scenes always emits a t=0
+    anchor — so this only documents the degenerate-input behavior.)"""
+    out = apply_coverage_floor([], duration_s=30.0, max_gap_s=20.0, include_tail_anchor=True)
+    assert len(out) == 1
+    assert out[0].t == 0.0 and out[0].kind == "floor"
+
+
 def test_apply_budget_cap_drops_lowest_scoring_detected_first():
     scenes = [Scene(t=float(i), score=float(i), kind="detected") for i in range(10)]
     out = apply_budget_cap(scenes, max_frames=4)

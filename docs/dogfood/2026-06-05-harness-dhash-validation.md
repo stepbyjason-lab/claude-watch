@@ -121,6 +121,18 @@ default-False leaves the short tail uncovered).
 **same 3 review flags, zero added noise** — the anchor added exactly one frame: the real final
 slide. The "even the last slide" gap is now closed.
 
+**Hardening (multi-lens review follow-up).** A four-lens review (code / Python / test / silent-failure)
+surfaced edge cases now guarded: an explicit `anchor_t > 0` check (never emit a negative seek on a
+video shorter than `tail_eps` or with an unprobed duration), a `warnings.warn` in `_probe_duration`
+when ffprobe reports no duration (so the anchor degrading to a no-op is *visible*, not silent), and
+four added unit tests pinning the byte-identical classic-mode default, the strict `>` guard boundary,
+the no-negative-timestamp invariant, and the empty-input contract. **Known limitation (accepted):** the
+anchor seeks to `duration − 0.5s`; on a pathological encoding whose container duration overruns the last
+decodable frame, ffmpeg could emit a near-EOF black frame (exit 0). The perceptual-hash dedup is a partial
+backstop and the real-footage run produced a valid frame, so this is documented rather than guarded with a
+luma check (which would risk false-positives on legitimately dark slides). Candidate follow-up if it ever
+surfaces in the field.
+
 ## Artifacts (local, not committed)
 
 - `D:\Work\_cw-validation\harness\…\frames\` — 25 extracted white-deck slides (54 MB incl. 720p source)

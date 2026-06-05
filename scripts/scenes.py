@@ -117,8 +117,12 @@ def apply_coverage_floor(
                 t += max_gap_s
     if include_tail_anchor:
         anchor_t = duration_s - tail_eps
-        last_t = max(s.t for s in out)
-        if anchor_t - last_t > tail_eps:
+        last_t = max(s.t for s in out)  # out is non-empty: sorted_scenes has >=1 element
+        # `anchor_t > 0` guards degenerate/short or unprobed (duration 0.0) videos so a
+        # negative seek time is never emitted; the second clause skips the anchor when an
+        # existing boundary already sits within tail_eps of it (the anchor only ever
+        # appends as the new maximum t, so comparing against last_t cannot duplicate one).
+        if anchor_t > 0.0 and anchor_t - last_t > tail_eps:
             out.append(Scene(t=anchor_t, score=0.0, kind="floor"))
     out.sort(key=lambda s: s.t)
     return out

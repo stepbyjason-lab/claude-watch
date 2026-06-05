@@ -200,7 +200,18 @@ def _probe_duration(video: Path) -> float:
         text=True,
         check=True,
     ).stdout.strip()
-    return float(out or 0.0)
+    if not out or out == "N/A":
+        # No duration tag (some transport streams / partial files). Don't silently
+        # fall back to 0.0 — that turns the tail anchor into a no-op and the final
+        # slide is lost again with no signal. Warn so the cause is visible.
+        warnings.warn(
+            f"ffprobe returned no duration for {video}; the slides tail anchor is "
+            "skipped, so a slide shown only in the final seconds may be missed.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return 0.0
+    return float(out)
 
 
 def detect_slides(
