@@ -107,7 +107,9 @@ def test_dhash_differs_for_different_frames(tmp_path):
             ],
             check=True,
         )
-    assert hamming(dhash(a), dhash(b)) > 0
+    # > drop_dist (4): two genuinely distinct slides must stay separable, i.e. the
+    # dedup must KEEP them, not just be "non-zero". Distinct patterns clear this easily.
+    assert hamming(dhash(a), dhash(b)) > 4
 
 
 def _records(ts):
@@ -181,10 +183,30 @@ def test_probe_dimensions_reads_fixture_wh():
 
 
 @pytest.mark.integration
-def test_detect_slides_returns_frame_records_on_fixture(tmp_path):
+def test_detect_slides_keeps_multiple_distinct_slides(tmp_path):
+    import subprocess
+
+    # The core risk of this dedup is OVER-merging distinct slides. The shared
+    # solid-colour fixture has no edges (collapses under an edge hash), so it
+    # can't test that. Build a 3-segment content video (distinct patterns with
+    # hard cuts) and verify the end-to-end dhash path keeps them apart.
+    clip = tmp_path / "deck.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-t", "2", "-i", "testsrc2=size=320x240:rate=4",
+            "-f", "lavfi", "-t", "2", "-i", "mandelbrot=size=320x240:rate=4",
+            "-f", "lavfi", "-t", "2", "-i", "rgbtestsrc=size=320x240:rate=4",
+            "-filter_complex",
+            "[0:v]format=yuv420p[a];[1:v]format=yuv420p[b];[2:v]format=yuv420p[c];"
+            "[a][b][c]concat=n=3:v=1[v]",
+            "-map", "[v]", str(clip),
+        ],
+        check=True,
+    )
     out = detect_slides(
-        FIXTURE,
-        out_dir=tmp_path,
+        clip,
+        out_dir=tmp_path / "frames",
         cam_corner="none",
         caption="none",
         threshold=0.30,
@@ -194,13 +216,10 @@ def test_detect_slides_returns_frame_records_on_fixture(tmp_path):
         width_px=1280,
         candidate_cap=800,
     )
-    # The shared fixture is solid red/white/blue (no edges), so the edge-based
-    # dhash dedup correctly collapses it. Real decks carry content; multi-slide
-    # dedup behaviour is covered by the test_dedup_* unit tests (injected hashes).
-    # Here we just verify the pipeline runs end-to-end and returns valid records.
-    assert out["slides"]
+    # three visually distinct segments must survive the dhash dedup
+    assert len(out["slides"]) >= 2
     for record in out["slides"]:
-        assert (tmp_path / record["path"]).exists()
+        assert (tmp_path / "frames" / record["path"]).exists()
         assert Path(record["path"]).name == record["path"]
     assert "flagged" in out
 

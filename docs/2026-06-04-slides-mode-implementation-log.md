@@ -25,14 +25,14 @@ Pipeline (slides mode only; the classic detection pipeline is unchanged — thou
 2. **Crop** out presenter cam + caption band → **scene-detect on the slide region** at low threshold (0.10).
 3. **Tight coverage floor** (20s) to catch light→light slide changes.
 4. **Extract** every candidate once at native 720p (1 decode + N keyframe seeks).
-5. **Perceptual-hash dedup** (zero-dependency ffmpeg 8×8 gray average-hash), **conservative**: drop only near-identical, **flag** (not drop) borderline pairs.
+5. **Perceptual-hash dedup** (zero-dependency ffmpeg 9×8 gray **difference (edge) hash**), **conservative**: drop only near-identical, **flag** (not drop) borderline pairs.
 6. **Manifest + stdout** emit `slides_extracted: N` and `review: near-dup …` lines.
 
 ### Design principles (spec §8)
 
 | Principle | Decision |
 |---|---|
-| Completeness over dedup (§8.0) | Over-capture, never silent-miss. Borderline pairs are kept + flagged for human review. Success = "0 slides missed, a few duplicates allowed". |
+| Completeness over dedup (§8.0) | Prefer over-capture to silent-miss. Borderline pairs are kept + flagged for human review. Success = **high recall, no silent borderline drops, gaps recorded honestly** (not "0 slides missed" — dogfood showed fast-flips / near-identical slides can still be missed). |
 | Cache identity (§8.1) | Default mode keeps **upstream hash** (`sha1(source\|focus)`) — existing caches preserved. Slides mode folds the **full detection profile** into the slug → any flag change busts the cache. No `slides.json` cache file. |
 | Minimal upstream diff (§8.2) | No `kind="slide"` on `Scene`. One `prefilter=""` kwarg on `detect_scenes`. Extraction profile via `extract_frames` args. |
 | Pass minimization (§8.3) | v1 = 1 full decode + N seeks (+ N hash spawns, see §5). Single-pass frame-dump deferred. |
@@ -115,7 +115,7 @@ Four review lenses run on the committed implementation. **No CRITICAL, no exploi
 | python | `phash_dedup` did not guard `flag_dist <= drop_dist` → borderline frames could be silent-dropped (breaks the high-recall promise) | Raises `ValueError` if `flag_dist <= drop_dist`; added test |
 | python / security | `build_crop_vf` validated with `assert` (stripped under `python -O`) | Changed to `raise ValueError`; updated tests to `pytest.raises(ValueError)` |
 | python | `cached and src_dir.glob("video.*")` — generator is always truthy → `StopIteration` if cache dir is empty (pre-existing upstream) | `cached_videos = list(...); if cached and cached_videos:` |
-| performance | `ahash` spawns one ffmpeg per candidate (actual cost = 1 decode + N seeks + **N hash spawns**), not stated in §8.3 | Documented as a known v1 deviation in spec §8.3; batch-hash deferred |
+| performance | the per-candidate hash (`dhash`) spawns one ffmpeg per candidate (actual cost = 1 decode + N seeks + **N hash spawns**), not stated in §8.3 | Documented as a known v1 deviation in spec §8.3; batch-hash deferred |
 | python | `hash_fn` untyped; docstring said "consecutive" (actually compares to last *kept*) | Added `Callable` type hint; clarified docstring |
 
 ### Fixed in `6d382e3` (cross-platform)
@@ -131,12 +131,12 @@ Four review lenses run on the committed implementation. **No CRITICAL, no exploi
 | `select_scenes()` had a dead containment check: `frames_dir` is structurally `LIBRARY_ROOT/slug/frames`, and the `relative_to()` result was discarded. | Removed the no-op line. |
 | `args.phash_dist + 6` was duplicated in the detector call and the cache-profile slug. | Centralized it through `SLIDES_FLAG_DIST_OFFSET` + `_slides_flag_dist()` to prevent hash-vs-behavior drift. |
 | Both branches duplicated the `frames/` manifest-path prefix transform. | Centralized it in `_prefix_frame_paths()`. |
-| `hash_fn` accepted `Path` in the type hint, while `detect_slides()` passes absolute paths as strings. | Updated `ahash` and `hash_fn` typing to `str \| Path`. |
+| `hash_fn` accepted `Path` in the type hint, while `detect_slides()` passes absolute paths as strings. | Updated the hash function and `hash_fn` typing to `str \| Path`. |
 
 ### Acknowledged, not fixed (single-user CLI / out of scope / deferred)
 
 - **Single-ffmpeg-pass frame-dump** (0 seeks) — deferred (spec §8.3 ⏸).
-- **`ahash` average-hash collides solid-black vs solid-white** — known naive-aHash limitation; irrelevant for real slides.
+- **`dhash` returns ~0 for solid-colour frames** (no edges to difference) — irrelevant for real slides, which carry text/graphics. The unit tests use content frames accordingly (the shared solid-colour fixture is unrepresentative for an edge hash). *(The earlier average hash had a different degenerate case — solid-black vs solid-white collision — which the white-deck dogfood showed also over-merged real text slides; hence the switch to dhash.)*
 - **Two `ffprobe` spawns** (`probe_dimensions` + `_probe_duration`) could be one — micro-opt.
 - **SSRF via yt-dlp HTTP redirects** to RFC1918/loopback — within the single-user threat model; only matters if ever wrapped server-side.
 
@@ -157,7 +157,7 @@ Four review lenses run on the committed implementation. **No CRITICAL, no exploi
 | File | Change |
 |---|---|
 | `scripts/scenes.py` | `detect_scenes(prefilter="")` kwarg + `_build_scene_vf` helper; `-protocol_whitelist file` |
-| `scripts/slides.py` | **new** — `build_crop_vf`, `ahash`/`hamming`, `phash_dedup`, `probe_dimensions`, `_probe_duration`, `detect_slides`, `CandidateCapExceeded`; `hash_fn` accepts `str \| Path` |
+| `scripts/slides.py` | **new** — `build_crop_vf`, `dhash`/`hamming`, `phash_dedup`, `probe_dimensions`, `_probe_duration`, `detect_slides`, `CandidateCapExceeded`; `hash_fn` accepts `str \| Path` |
 | `scripts/download.py` | `format_selector` enum (720p/1080p/best, default byte-identical); `download_video(fmt=)`; `--no-playlist` preserved |
 | `scripts/library.py` | `slug_for` — default=upstream hash, slides=full profile |
 | `scripts/frames.py` | `extract_frames(native=)`; `-protocol_whitelist file` |
