@@ -81,7 +81,7 @@ required for this item.
 
 The first pass reported "~4–5 white-deck transitions not captured." We probed each of the 6
 ground-truth timestamps the default run missed by measuring the dHash distance of a frame at
-that timestamp to the nearest *kept* frame (`D:\Work\_cw-validation\probe_missed.py`):
+that timestamp to the nearest *kept* frame (via a local scratch probe script, not committed):
 
 | missed GT t | dHash dist to nearest kept | reality |
 |---|---|---|
@@ -133,8 +133,8 @@ backstop and the real-footage run produced a valid frame, so this is documented 
 luma check (which would risk false-positives on legitimately dark slides). Candidate follow-up if it ever
 surfaces in the field.
 
-## Artifacts (local, not committed)
+## Artifacts (local scratch, not committed)
 
-- `D:\Work\_cw-validation\harness\…\frames\` — 25 extracted white-deck slides (54 MB incl. 720p source)
-- `D:\Work\_cw-validation\eunco\…\frames\` — 30 extracted color-deck slides (42 MB incl. source)
-- v1 ground truth: `D:\SecondBrain\_assets\harness-engineering-2026-06-04\` (28 frames)
+- White-deck harness run — 25 extracted slides + 720p source (~54 MB)
+- Color-deck (eunco) run — 30 extracted slides + source (~42 MB)
+- v1 ground-truth frames (28) from the original manual harness pass

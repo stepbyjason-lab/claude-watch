@@ -49,7 +49,7 @@ download(720p) → [slides.py] crop-detect → floor(촘촘) → phash dedup →
    - `--caption {bottom,top,none}` 기본 `bottom` (≈하단 15%h 제외)
 3. **감지**: crop 스트림에 `select='gt(scene,T)'`, **T 기본 0.10**(`--scene-threshold`로 조정). → 슬라이드 전환 후보 타임스탬프.
 4. **촘촘 floor**: `--max-gap` 기본 **20s**(slides 모드)로 낮춰, scene이 놓친 밝은색→밝은색 슬라이드 보강.
-5. **phash dedup**: 후보 프레임들의 **슬라이드 영역(crop) perceptual hash**(예: aHash/dHash 8×8) 계산. 직전 보존 프레임과 해밍거리 ≤ 임계(기본 ~5)면 **같은 슬라이드로 보고 드롭**. → 같은 슬라이드 중복 제거.
+5. **phash dedup**: 후보 프레임들의 **슬라이드 영역(crop) perceptual hash**(dHash 9×8, §8.4) 계산. 직전 보존 프레임과 해밍거리 ≤ 임계(기본 drop_dist=4)면 **같은 슬라이드로 보고 드롭**. → 같은 슬라이드 중복 제거.
 6. **추출**: 살아남은 타임스탬프에서 **전체 프레임**(crop 아님)을 네이티브 720p(scale=1280:-2), JPEG q2~3로 저장. (저장본은 슬라이드 전체 — 작은 캠은 허용.)
 7. **예산 cap 해제**: slides 모드는 80장 cap 미적용(또는 매우 높게). 슬라이드는 보통 20~60장.
 
@@ -129,7 +129,7 @@ download(720p) → [slides.py] crop-detect → floor(촘촘) → phash dedup →
 - 원안 3패스(감지 full-decode → phash용 임시추출 N seek → 최종추출 K seek) 중 **pass2/pass3는 같은 작업 분할** — 후보를 한 번만 추출하고 그 JPEG로 phash하면 최종추출(K seek)이 사라짐.
 - ✅ **v1 구현 채택 = 1 full decode + N keyframe seek**: 감지 패스(`detect_scenes` + crop `prefilter`, null 출력) → 후보를 `extract_frames`로 **한 번만** 720p 추출(N seek) → 디스크 JPEG에서 phash dedup → loser만 `unlink`. **비디오 재접근 0**(survivor는 이미 디스크). N≈20~60 seek 허용.
 - ⏸ **deferred 최적화** (v1 미채택): 감지 패스에서 후보를 동시 덤프(`ffmpeg -vf "crop=...,select=...,showinfo" -vsync 0 cand_%04d.jpg`)해 N seek까지 제거(1 decode + 0 seek). split-filter stateful 복잡성 + 저장본 full-frame 요구 때문에 v1 보류. 실측 후 필요 시 도입.
-- 📝 **알려진 v1 편차**: phash가 후보 JPEG마다 ffmpeg를 1회 spawn(`ahash`)하므로 실제 비용은 **1 full decode + N seek + N hash-spawn**. 정상 규모(N≈수십~백)에선 +5~10s, `candidate_cap=800` 한계에선 더 큼. 위 단일덤프 최적화와 함께 **batch-hash**(한 번의 ffmpeg로 다수 8×8 추출)로 묶는 것을 후속 과제로 둠.
+- 📝 **알려진 v1 편차**: phash가 후보 JPEG마다 ffmpeg를 1회 spawn(`dhash`, §8.4)하므로 실제 비용은 **1 full decode + N seek + N hash-spawn**. 정상 규모(N≈수십~백)에선 +5~10s, `candidate_cap=800` 한계에선 더 큼. 위 단일덤프 최적화와 함께 **batch-hash**(한 번의 ffmpeg로 다수 9×8 추출)로 묶는 것을 후속 과제로 둠.
 
 ### 8.4 zero-dependency phash (architect M2)
 - ❌ Pillow/imagehash 신규 의존성 추가 **안 함**(dev-workflow "의존성 추가" 게이트 + repo는 ffmpeg/yt-dlp shell-out만).
