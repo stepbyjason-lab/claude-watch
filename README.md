@@ -47,7 +47,8 @@ for every mode — see [Note quality](#note-quality).
 - Crops out the presenter cam + burned-in caption, then scene-detects on the *slide region* at
   a low threshold — so slide→slide changes the whole-frame detector misses are caught.
 - A tight coverage floor plus a conservative **perceptual-hash dedup** (zero new dependencies —
-  the 8×8 average hash is computed via `ffmpeg`): near-identical frames are dropped, but
+  the 8×8 difference (edge) hash is computed via `ffmpeg` — an edge hash, not an average
+  hash, so it tells apart monochrome text slides on white decks): near-identical frames are dropped, but
   borderline pairs are **kept and flagged**, not silently merged.
 - Downloads 720p and extracts at native resolution; `--hi-res` for tiny-text decks.
 - New flags: `--slides`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`.

@@ -36,7 +36,7 @@ Pipeline (slides mode only; the classic detection pipeline is unchanged — thou
 | Cache identity (§8.1) | Default mode keeps **upstream hash** (`sha1(source\|focus)`) — existing caches preserved. Slides mode folds the **full detection profile** into the slug → any flag change busts the cache. No `slides.json` cache file. |
 | Minimal upstream diff (§8.2) | No `kind="slide"` on `Scene`. One `prefilter=""` kwarg on `detect_scenes`. Extraction profile via `extract_frames` args. |
 | Pass minimization (§8.3) | v1 = 1 full decode + N seeks (+ N hash spawns, see §5). Single-pass frame-dump deferred. |
-| Zero new dependency (§8.4) | Perceptual hash via ffmpeg `scale=8:8,format=gray` → 64 bytes → 64-bit average hash. No Pillow/imagehash. |
+| Zero new dependency (§8.4) | Perceptual hash via ffmpeg `scale=9:8,format=gray` → 72 bytes → 64-bit **difference (edge) hash**. No Pillow/imagehash. *(Originally an 8×8 average hash; switched to a difference hash after the white-deck dogfood — average hash collapsed distinct monochrome text slides; see the dogfood note.)* |
 | Security (§8.5) | `urlparse`-based scheme allowlist, argparse `choices=` + `ValueError` validation, threshold range check, candidate cap, `-protocol_whitelist file`, enum download format, `--no-playlist`. |
 | Native extraction (§8.6) | `extract_frames(native=True)` → no downscale, 1:1 from 720p source. |
 | Integration seam (§8.7) | `select_scenes()` strategy seam keeps `main()` linear. SKILL.md slides guidance. |

@@ -133,7 +133,7 @@ download(720p) → [slides.py] crop-detect → floor(촘촘) → phash dedup →
 
 ### 8.4 zero-dependency phash (architect M2)
 - ❌ Pillow/imagehash 신규 의존성 추가 **안 함**(dev-workflow "의존성 추가" 게이트 + repo는 ffmpeg/yt-dlp shell-out만).
-- ✅ ffmpeg로 후보의 슬라이드 영역을 **8×8 그레이스케일 raw**로 축소(`-vf "crop=...,scale=8:8,format=gray" -f rawvideo`) → 64바이트 읽어 평균 기준 aHash(64bit) 계산, 해밍거리. 표준 라이브러리만.
+- ✅ ffmpeg로 후보의 슬라이드 영역을 **9×8 그레이스케일 raw**로 축소(`-vf "crop=...,scale=9:8,format=gray" -f rawvideo`) → 72바이트 읽어 **dHash(차이해시, 픽셀>오른쪽이웃, 64bit)** 계산, 해밍거리. 표준 라이브러리만. *(초안은 8×8 평균해시(aHash)였으나, 흰 배경 텍스트 덱에서 평균해시가 서로 다른 텍스트 슬라이드를 과병합하는 게 실측 확인되어 dHash로 교체 — 28장 흰덱에서 인접 오병합 18/27→1/27.)*
 
 ### 8.5 입력 검증 / 보안 (security HIGH·MEDIUM)
 - `--cam-corner` `choices=["tr","tl","br","bl","none"]`, `--caption` `choices=["bottom","top","none"]` (argparse) **+ slides.py 진입 assert**(필터그래프 주입 차단).

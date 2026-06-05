@@ -64,9 +64,21 @@ def hamming(a: int, b: int) -> int:
     return (a ^ b).bit_count()
 
 
-def ahash(image_path: str | Path, crop_vf: str = "") -> int:
-    """Compute a zero-dependency 64-bit average hash through ffmpeg."""
-    vf = f"{crop_vf}scale=8:8,format=gray"
+def dhash(image_path: str | Path, crop_vf: str = "") -> int:
+    """Compute a zero-dependency 64-bit difference (gradient) hash through ffmpeg.
+
+    A difference hash compares each pixel to its RIGHT neighbour, so it keys on
+    edges / text layout rather than overall brightness. This is dramatically better
+    than an average hash at telling apart **monochrome text slides** (white decks):
+    such slides have near-identical average grayness but different text, so an
+    average hash collapses them (over-merge) while dhash keeps them distinct.
+    Measured on a 28-slide white-text deck, switching avg->diff hash cut wrongly
+    merged adjacent slides from 18/27 to 1/27 at the same 64-bit / drop_dist=4.
+
+    Downscales the (optionally cropped) region to 9x8 grayscale and emits one bit
+    per `pixel > right-neighbour` comparison -> 8x8 = 64 bits.
+    """
+    vf = f"{crop_vf}scale=9:8,format=gray"
     cmd = [
         "ffmpeg",
         "-hide_banner",
@@ -86,14 +98,17 @@ def ahash(image_path: str | Path, crop_vf: str = "") -> int:
         "-",
     ]
     raw = subprocess.run(cmd, capture_output=True, check=True).stdout
-    if len(raw) != 64:
-        raise RuntimeError(f"ahash expected 64 gray bytes, got {len(raw)} for {image_path}")
+    if len(raw) != 72:
+        raise RuntimeError(f"dhash expected 72 gray bytes (9x8), got {len(raw)} for {image_path}")
 
-    avg = sum(raw) / 64.0
     bits = 0
-    for i, value in enumerate(raw):
-        if value >= avg:
-            bits |= 1 << i
+    pos = 0
+    for row in range(8):
+        base = row * 9
+        for col in range(8):
+            if raw[base + col] > raw[base + col + 1]:
+                bits |= 1 << pos
+            pos += 1
     return bits
 
 
@@ -103,7 +118,7 @@ def phash_dedup(
     crop_vf: str,
     drop_dist: int = 4,
     flag_dist: int = 10,
-    hash_fn: Callable[[str | Path, str], int] = ahash,
+    hash_fn: Callable[[str | Path, str], int] = dhash,
 ) -> tuple[list[dict], list[tuple[float, float, int]]]:
     """Drop frames near-identical to the last KEPT frame; keep and flag borderline pairs.
 
