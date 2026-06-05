@@ -1,7 +1,7 @@
 # claude-watch
 
 > **This is a fork** of [`devinilabs/claude-watch`](https://github.com/devinilabs/claude-watch)
-> that adds a **`--slides` mode** for capturing every slide of a lecture deck, plus a
+> that adds a **`--slides` mode** for high-recall capture of a lecture deck, plus a
 > **concept-first note contract**. Classic extraction and existing caches are unchanged. → [**Changes in this fork**](#changes-in-this-fork)
 
 **Turn any tutorial or lecture video into structured study notes.** Paste a URL, walk away, come back to a markdown file with embedded screenshots, timestamped transcript, and Claude's synthesis — saved to a persistent library.
@@ -43,14 +43,16 @@ This fork (`stepbyjason-lab/claude-watch`) adds a **`--slides` mode** on top of 
 flag and its pipeline are purely additive). The note-writing contract is now **concept-first**
 for every mode — see [Note quality](#note-quality).
 
-**New — `--slides`: capture every unique slide of a lecture deck.**
+**New — `--slides`: high-recall capture of a lecture deck (aims for every prepared slide).**
 - Crops out the presenter cam + burned-in caption, then scene-detects on the *slide region* at
   a low threshold — so slide→slide changes the whole-frame detector misses are caught.
 - A tight coverage floor plus a conservative **perceptual-hash dedup** (zero new dependencies —
   the 8×8 average hash is computed via `ffmpeg`): near-identical frames are dropped, but
-  borderline pairs are **kept and flagged**, not silently merged (high recall — never miss a slide).
+  borderline pairs are **kept and flagged**, not silently merged.
 - Downloads 720p and extracts at native resolution; `--hi-res` for tiny-text decks.
 - New flags: `--slides`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`.
+
+> **High-recall, not exhaustive.** A real run ([dogfood](docs/dogfood/2026-06-05-detailpage-slides.md)) widened coverage well beyond manual sampling, but still missed a *visually-similar* step slide (merged by the dedup) and two *fast-flipped* slides. Keep the transcript as a parallel source; lower `--phash-dist` if similar slides merge.
 
 **Supporting changes (additive / backward-compatible):**
 - `slug_for`: slides runs fold their full detection profile into the cache key, so changing any

@@ -667,7 +667,9 @@ PY
 
 Expected: `contract review ok`
 
-- [ ] **Step 3: Required dogfood against one cached video**
+- [x] **Step 3: Required dogfood against one cached video**
+
+> ✅ **Done (2026-06-05):** ran on a 54-min slide lecture — see [`../dogfood/2026-06-05-detailpage-slides.md`](../dogfood/2026-06-05-detailpage-slides.md). Rubric **11/12 (PASS)**. Confirmed the concept-first contract holds in the field, and that `--slides` is **high-recall, not exhaustive** (a visually-similar step slide was merged; two fast-flipped slides were missed) — which is why the docs now say "high-recall" and keep the transcript as a parallel source.
 
 Pick one previously disappointing cached library artifact. Re-read its frames and transcript without rerunning `watch.py`, then draft a new `notes.md` using the new contract.
 

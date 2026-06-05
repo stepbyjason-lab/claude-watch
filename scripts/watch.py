@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-whisper", action="store_true", help="disable Whisper fallback")
     p.add_argument("--out-dir", help="library root (default: ~/claude-watch/library)")
     p.add_argument("--slides", action="store_true",
-                   help="slide-deck mode: capture every unique slide")
+                   help="slide-deck mode: high-recall capture of a prepared deck")
     p.add_argument("--cam-corner", choices=["tr", "tl", "br", "bl", "none"], default="tr",
                    help="presenter-cam corner to exclude from slide detection")
     p.add_argument("--caption", choices=["bottom", "top", "none"], default="bottom",

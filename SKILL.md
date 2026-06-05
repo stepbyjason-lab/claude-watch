@@ -43,7 +43,7 @@ If a Whisper key is still missing afterwards, use `AskUserQuestion` to ask wheth
 
 **Step 1.5 — classify the video and choose extraction flags (before running).** The `--slides` decision changes how frames are extracted, so make it **now**, not after the script has run:
 
-- **Slide lecture / seminar (prepared deck):** run with `--slides` so every unique prepared slide is captured. Do **not** run plain scene mode on a slide deck — that defeats the whole point of slides mode. Group the slides by concept when you write the notes.
+- **Slide lecture / seminar (prepared deck):** run with `--slides` for high-recall capture of the prepared deck. Do **not** run plain scene mode on a slide deck — that defeats the whole point of slides mode. (It is high-recall, not exhaustive — see the caveat under *Slides mode*.) Group the slides by concept when you write the notes.
 - **Conceptual talk without slides:** plain scene mode; organize the notes by thesis, concepts, arguments, examples, caveats, and applications.
 - **Code walkthrough:** plain scene mode; organize the notes by implementation milestones, intent, design decisions, reusable patterns, and caveats.
 - **Product / UI demo:** plain scene mode; organize the notes by workflow or feature area, with screenshots explaining UI states and decisions.
@@ -66,7 +66,7 @@ Optional flags:
 - `--whisper groq|openai` — force backend
 - `--no-whisper` — disable Whisper entirely
 - `--out-dir DIR` — override library root
-- `--slides` — **slide-deck mode**: capture every unique slide (see *Slides mode* below)
+- `--slides` — **slide-deck mode**: high-recall capture of a prepared deck (see *Slides mode* below)
 - `--cam-corner {tr,tl,br,bl,none}` — presenter-cam corner to exclude (slides mode; default `tr`)
 - `--caption {bottom,top,none}` — burned-in caption band to exclude (slides mode; default `bottom`)
 - `--hi-res` — slides mode: download 1080p instead of 720p (tiny-text decks)
@@ -91,7 +91,7 @@ For lecture/seminar videos where the speaker presents slides, add `--slides`:
 python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "<source>" --slides
 ```
 
-This captures **every unique slide** (page 1 → last): downloads 720p, detects slide
+This **aims to capture every prepared slide** (page 1 → last — high recall, not a guarantee): downloads 720p, detects slide
 changes on the slide region (excluding the presenter cam + burned-in caption),
 deduplicates near-identical frames, and extracts at native 720p.
 
@@ -100,6 +100,8 @@ deduplicates near-identical frames, and extracts at native 720p.
 - `--hi-res` — download 1080p (only for decks with very small text).
 - `--phash-dist N` (default 4) — dedup aggressiveness; lower keeps more near-duplicates.
 - `--slides` **cannot** be combined with `--start`/`--end` in v1 (the script errors out).
+
+> **High-recall, not exhaustive.** `--slides` captures far more of a deck than manual sampling, but it is not a guarantee. *Fast page-flips* (a slide shown for a second or two) and *visually-similar slides* (e.g. consecutive build steps) can still be **skipped or merged** by the dedup. So: keep the **transcript as a parallel evidence source**, record any gaps honestly in the Slide Coverage Ledger, and lower `--phash-dist` (e.g. `4 → 2`) if similar slides get merged. Field evidence: [`docs/dogfood/2026-06-05-detailpage-slides.md`](docs/dogfood/2026-06-05-detailpage-slides.md).
 
 **Reading slides-mode output:** read every extracted slide, preserve every unique prepared slide, but do **not** make "one slide = one section" the default note structure. Frames are ordered by timestamp = deck order, and `slides_extracted: N` tells you how many distinct slides were captured. Use the slides as evidence, then group adjacent slides into the concepts, claims, frameworks, examples, or caveats they support.
 
