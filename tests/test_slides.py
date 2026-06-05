@@ -217,7 +217,7 @@ def test_detect_slides_keeps_multiple_distinct_slides(tmp_path):
         candidate_cap=800,
     )
     # three visually distinct segments must survive the dhash dedup
-    assert len(out["slides"]) >= 2
+    assert len(out["slides"]) >= 3
     for record in out["slides"]:
         assert (tmp_path / "frames" / record["path"]).exists()
         assert Path(record["path"]).name == record["path"]

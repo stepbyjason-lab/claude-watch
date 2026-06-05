@@ -12,7 +12,7 @@ Complete record of the `--slides` feature: design → multi-lens review → 3-ro
 
 ## 1. What shipped
 
-A `--slides` mode that captures **every unique slide** of a lecture/seminar video, legibly, without silently dropping distinct slides.
+A `--slides` mode that **aims to capture every prepared slide** of a lecture/seminar video (high recall, not exhaustive), legibly, without silently dropping distinct slides.
 
 ```bash
 python3 scripts/watch.py "<url>" --slides

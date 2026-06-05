@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **⚠️ Superseded — notes contract:** the SKILL.md *note-writing* guidance this plan adds (Task 9's "Reading the output in slides mode → one slide = one section" and Task 10's per-scene template) was **replaced** by the concept-first redesign. For the current note contract see [`2026-06-04-note-quality-template-redesign.md`](2026-06-04-note-quality-template-redesign.md) (plan) and [`../specs/2026-06-04-note-quality-template-redesign.md`](../specs/2026-06-04-note-quality-template-redesign.md) (spec). The `--slides` **extraction** pipeline (Tasks 1–9) is still current; only the "one slide = one section" / scene-first template is obsolete. **Do not re-add it.**
+> **⚠️ Superseded — notes contract:** the SKILL.md *note-writing* guidance this plan adds (Task 9's "Reading the output in slides mode → one slide = one section" and Task 10's per-scene template) was **replaced** by the concept-first redesign. For the current note contract see [`2026-06-04-note-quality-template-redesign.md`](2026-06-04-note-quality-template-redesign.md) (plan) and [`../specs/2026-06-04-note-quality-template-redesign.md`](../specs/2026-06-04-note-quality-template-redesign.md) (spec). The `--slides` **extraction** pipeline (Tasks 1–9) is still current **with one exception: Task 3's perceptual hash was changed from an 8×8 *average* hash (`ahash`) to a 9×8 *difference (edge)* hash (`dhash`)** after the white-deck dogfood — the average hash over-merged monochrome text slides. If re-running this plan, implement the hash as `dhash` per `scripts/slides.py`, **not** the `ahash` taught in Task 3. The "one slide = one section" / scene-first note template is also obsolete. **Do not re-add either.**
 
-**Goal:** Add a `--slides` mode to claude-watch that captures every unique slide of a lecture video, legibly, without silently dropping distinct slides.
+**Goal:** Add a `--slides` mode to claude-watch for high-recall capture of a lecture deck (aiming for every prepared slide), legibly, without silently dropping distinct slides.
 
 **Architecture:** A separate detection path (`scripts/slides.py`) that (1) downloads 720p, (2) scene-detects on a *cropped* slide region (cam/caption excluded) at a low threshold, (3) adds a tight coverage floor, (4) extracts candidates once at native 720p, (5) deduplicates near-identical frames via a zero-dependency perceptual hash computed on the slide region — conservatively, flagging borderline pairs instead of dropping them. The existing non-slides pipeline is untouched (byte-identical defaults); the only shared-code change is one optional `prefilter=` kwarg on `detect_scenes`.
 
@@ -20,7 +20,7 @@
 - **Cache identity (§8.1):** slides runs get a distinct library dir — mode + resolution + the **full detection profile** (crop/threshold/gap/phash flags) folded into the slug (Task 6), so changing any flag busts the cache. Never reuse a normal run's 360p `video.*` or whole-frame scenes. Slides mode writes **no** scene-cache file; slug isolation alone guarantees correctness.
 - **Minimal upstream diff (§8.2):** do NOT add `kind="slide"` to `Scene`. Add one `prefilter=""` kwarg to `detect_scenes` (default keeps byte-identical behavior).
 - **Single extraction (§8.3):** detect pass writes no frames; extract candidates ONCE at full 720p; phash-dedup on those JPEGs; `unlink()` losers. No re-decode.
-- **Zero new dependency (§8.4):** perceptual hash via ffmpeg `scale=8:8,format=gray` → 64 raw bytes → 64-bit average hash.
+- **Zero new dependency (§8.4):** perceptual hash via ffmpeg `scale=9:8,format=gray` → 72 raw bytes → 64-bit **difference (edge) hash** (`dhash`). *(Originally an 8×8 average hash; Task 3 below still shows the average-hash steps — superseded, see the banner above.)*
 - **Security (§8.5):** enum `choices=` + assert; reject non-http(s) schemes; `--scene-threshold` ∈ (0,1); candidate hard-cap; `-protocol_whitelist file`; `--out-dir` wipe containment check; download format via enum, never raw `-f` string.
 
 ## File structure
@@ -28,7 +28,7 @@
 | File | Create/Modify | Responsibility |
 |---|---|---|
 | `scripts/scenes.py` | Modify | Add `prefilter=` kwarg to `detect_scenes` (reuse parser for crop detection) |
-| `scripts/slides.py` | **Create** | Slide-mode: `probe_dimensions`, `build_crop_vf`, `ahash`/`hamming`, `phash_dedup`, `detect_slides` orchestrator |
+| `scripts/slides.py` | **Create** | Slide-mode: `probe_dimensions`, `build_crop_vf`, `dhash`/`hamming`, `phash_dedup`, `detect_slides` orchestrator |
 | `scripts/download.py` | Modify | `download_video(..., fmt=...)` enum format selection (default byte-identical) |
 | `scripts/library.py` | Modify | `slug_for` folds mode + resolution + full slides profile into the hash; non-slides keeps upstream hash (distinct dirs) |
 | `scripts/frames.py` | Modify | `extract_frames(..., native=False)` — native (no-downscale) extraction |
@@ -214,6 +214,8 @@ git commit -m "feat(slides): build_crop_vf slide-region crop builder with valida
 ---
 
 ## Task 3: Zero-dependency perceptual hash (`ahash`, `hamming`)
+
+> **⚠️ Superseded — implement `dhash`, not `ahash`.** The average hash (`ahash`) built in the steps below was later replaced by a **difference hash (`dhash`)** — `scale=9:8,format=gray` + one bit per `pixel > right-neighbour` → 64 bits — because the 8×8 average hash over-merged monochrome white-text decks (a 28-slide deck collapsed to ~6 frames; difference hash cut wrongly-merged adjacent slides 18/27 → 1/27). The steps below are kept as the historical TDD record; the **current implementation in `scripts/slides.py` is `dhash`** (tests are `test_dhash_*`). If re-running this plan, build `dhash` instead of `ahash`.
 
 **Files:**
 - Modify: `scripts/slides.py`
@@ -911,7 +913,7 @@ Add argparse flags in `main()` after the existing ones:
 
 ```python
     p.add_argument("--slides", action="store_true",
-                   help="slide-deck mode: capture every unique slide (crop-detect + phash dedup)")
+                   help="slide-deck mode: high-recall capture of a prepared deck (crop-detect + phash dedup)")
     p.add_argument("--cam-corner", choices=["tr", "tl", "br", "bl", "none"], default="tr",
                    help="presenter-cam corner to exclude from slide detection (slides mode)")
     p.add_argument("--caption", choices=["bottom", "top", "none"], default="bottom",
@@ -1097,7 +1099,7 @@ For lecture/seminar videos where the speaker presents slides, add `--slides`:
 python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "<url>" --slides
 ```
 
-This captures **every unique slide** (page 1 → last): downloads 720p, detects slide
+This **aims to capture every prepared slide** (page 1 → last, high recall): downloads 720p, detects slide
 changes on the slide region (excluding the presenter cam + burned-in caption),
 deduplicates near-identical frames, and extracts at native 720p.
 
@@ -1181,7 +1183,7 @@ git commit -m "test(slides): network-gated regression on harness deck (~28 slide
 - **Spec coverage:** §8.0 flag-not-drop → Task 4. §8.1 cache identity (full slides_profile in slug, no scene-cache file) → Task 6 (+ Task 9 sets `meta['slides_profile']`). §8.2 prefilter/no-kind-slide → Task 1 (+ Tasks 3/8 reuse Scene unchanged). §8.3 1-decode+N-seek (single-dump deferred) → Tasks 8,9. §8.4 zero-dep hash → Task 3. §8.5 security (choices/urlparse-scheme/threshold/cap/whitelist/containment/enum-format) → Tasks 2,5,7,9. §8.6 native extract → Task 7. §8.7 select_scenes seam + SKILL.md → Tasks 9,10. §8.8 decomposition → Tasks 2-4,8. **focus×slides:** v1 forbids the combo (`_validate_slides_focus`, Task 9).
 - **Open from §8.9** (tune crop defaults, overlap policy, floor∈dedup): crop defaults tuned in Task 11; overlap/<50% handled in Task 2; floor frames flow through `phash_dedup` in Task 8 (floored list is the candidate set).
 - **Placeholder:** none. (The earlier duration-probe placeholder marker in Task 8 was removed; duration comes from `_probe_duration`.)
-- **Type consistency:** frame records carry `index,t,path,kind`; `detect_slides` returns `{"slides":[records],"flagged":[(t,t,d)]}`; `phash_dedup(records, *, crop_vf, drop_dist, flag_dist, hash_fn)`; `ahash(path, crop_vf)`; `build_crop_vf(w,h,cam_corner,caption,*,cam_frac,cap_frac)`; `download_video(...,fmt=)`; `extract_frames(...,native=)` — consistent across tasks.
+- **Type consistency:** frame records carry `index,t,path,kind`; `detect_slides` returns `{"slides":[records],"flagged":[(t,t,d)]}`; `phash_dedup(records, *, crop_vf, drop_dist, flag_dist, hash_fn)`; `dhash(path, crop_vf)`; `build_crop_vf(w,h,cam_corner,caption,*,cam_frac,cap_frac)`; `download_video(...,fmt=)`; `extract_frames(...,native=)` — consistent across tasks.
 
 ## Out of scope (do NOT implement — spec §5/§8.10)
 auto slide-region detection; OCR page-number verification; single-ffmpeg-pass frame-dump optimization; cross-deck dedup; cam-cropping the saved output.
