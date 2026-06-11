@@ -15,3 +15,7 @@ dist/
 # claude-watch-runtime data should never be committed
 library/
 .env
+
+# Session tooling artifacts
+.madi/
+uv.lock
