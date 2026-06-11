@@ -1,6 +1,6 @@
 ---
 name: claude-watch
-description: Watch a tutorial or lecture video (URL or local path) and produce concept-first study notes. Downloads with yt-dlp, detects scene or slide changes with ffmpeg, pulls a timestamped transcript (captions or Whisper API fallback), and writes synthesized markdown notes with inline visual evidence and timestamped traceability to ~/claude-watch/library/<slug>/.
+description: Watch a tutorial or lecture video (URL or local path) and produce concept-first study notes. Downloads with yt-dlp, detects scene or slide changes with ffmpeg, pulls a timestamped transcript (captions or Whisper API fallback), and writes synthesized markdown notes with inline visual evidence and timestamped traceability to the claude-watch library (OS app-data dir by default; --out-dir or CLAUDE_WATCH_LIBRARY overrides).
 argument-hint: "<video-url-or-path> [topic-or-question]"
 allowed-tools: Bash, Read, Write, AskUserQuestion
 homepage: https://github.com/devinilabs/claude-watch
@@ -27,7 +27,7 @@ Exit codes: `0` ready (silent — proceed), `2` missing binaries, `3` missing AP
 python3 "${CLAUDE_SKILL_DIR}/scripts/setup.py"
 ```
 
-On macOS this auto-`brew install`s ffmpeg + yt-dlp. On Linux/Windows it prints the right commands. It scaffolds `~/.config/claude-watch/.env` (mode 0600) with commented placeholders.
+On macOS this auto-`brew install`s ffmpeg + yt-dlp. On Linux/Windows it prints the right commands. It scaffolds `~/.config/claude-watch/.env` (mode 0600 on Unix; not enforced on Windows) with commented placeholders.
 
 If a Whisper key is still missing afterwards, use `AskUserQuestion` to ask whether the user has a Groq key (preferred — cheaper, faster) or an OpenAI key, and write it to `~/.config/claude-watch/.env`. If they don't want to, run with `--no-whisper`; videos without native captions will come back frames-only.
 
@@ -235,6 +235,6 @@ If the user asks a follow-up about a video you already watched in this session, 
 
 - Runs `yt-dlp`, `ffmpeg`, `ffprobe` locally
 - Sends extracted mono 16 kHz audio to Groq (preferred) or OpenAI Whisper API only when captions are missing
-- Reads/writes `~/.config/claude-watch/.env` (mode 0600) for keys
-- Persists artifacts to `~/claude-watch/library/<slug>/` — review the directory after first run if you're cautious
+- Reads/writes `~/.config/claude-watch/.env` for keys (mode 0600 on Unix; Windows does not enforce file modes — protect the file with ACLs on shared machines)
+- Persists artifacts to the library root (default: the OS app-data dir, e.g. `%LOCALAPPDATA%\claude-watch\library` on Windows; override — highest priority first — `--out-dir`, the `CLAUDE_WATCH_LIBRARY` env var, or the same key in `~/.config/claude-watch/.env`; pre-existing legacy `~/claude-watch/library` keeps working) — review the directory after first run if you're cautious
 - Does NOT log or transmit API keys, video files, or the original URL outside the audio-to-Whisper call

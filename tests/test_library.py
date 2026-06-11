@@ -4,6 +4,8 @@ from pathlib import Path
 
 from scripts.library import (
     LIBRARY_ROOT,
+    default_library_root,
+    resolve_library_root,
     slug_for,
     cache_lookup,
     write_manifest,
@@ -117,6 +119,126 @@ def test_slug_format_is_date_title_hash():
     # 2026 / 05 / 03 / hello / world / <hash>
     assert s.startswith("2026-05-03-")
     assert len(parts[-1]) == 4  # 4-char short hash
+
+
+def test_default_library_root_windows_uses_localappdata(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.library.platform.system", lambda: "Windows")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert default_library_root() == tmp_path / "claude-watch" / "library"
+
+
+def test_default_library_root_macos_uses_application_support(monkeypatch):
+    monkeypatch.setattr("scripts.library.platform.system", lambda: "Darwin")
+    expected = Path.home() / "Library" / "Application Support" / "claude-watch" / "library"
+    assert default_library_root() == expected
+
+
+def test_default_library_root_linux_respects_xdg_data_home(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.library.platform.system", lambda: "Linux")
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
+    assert default_library_root() == tmp_path / "claude-watch" / "library"
+
+
+def test_default_library_root_linux_falls_back_to_local_share(monkeypatch):
+    monkeypatch.setattr("scripts.library.platform.system", lambda: "Linux")
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    expected = Path.home() / ".local" / "share" / "claude-watch" / "library"
+    assert default_library_root() == expected
+
+
+def test_resolve_env_var_wins_over_everything(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("CLAUDE_WATCH_LIBRARY=" + str(tmp_path / "from-file") + "\n")
+    monkeypatch.setattr("scripts.library.CONFIG_ENV_PATH", env_file)
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    monkeypatch.setattr("scripts.library.LEGACY_LIBRARY_ROOT", legacy)
+    monkeypatch.setenv("CLAUDE_WATCH_LIBRARY", str(tmp_path / "from-env"))
+    assert resolve_library_root() == tmp_path / "from-env"
+
+
+def test_resolve_config_file_wins_over_legacy(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_WATCH_LIBRARY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# comment\nGROQ_API_KEY=g\nCLAUDE_WATCH_LIBRARY=\"" + str(tmp_path / "from-file") + "\"\n"
+    )
+    monkeypatch.setattr("scripts.library.CONFIG_ENV_PATH", env_file)
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    monkeypatch.setattr("scripts.library.LEGACY_LIBRARY_ROOT", legacy)
+    assert resolve_library_root() == tmp_path / "from-file"
+
+
+def test_resolve_legacy_dir_used_when_it_exists(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_WATCH_LIBRARY", raising=False)
+    monkeypatch.setattr("scripts.library.CONFIG_ENV_PATH", tmp_path / "absent.env")
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    monkeypatch.setattr("scripts.library.LEGACY_LIBRARY_ROOT", legacy)
+    assert resolve_library_root() == legacy
+
+
+def test_resolve_falls_back_to_platform_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_WATCH_LIBRARY", raising=False)
+    monkeypatch.setattr("scripts.library.CONFIG_ENV_PATH", tmp_path / "absent.env")
+    monkeypatch.setattr("scripts.library.LEGACY_LIBRARY_ROOT", tmp_path / "no-legacy")
+    assert resolve_library_root() == default_library_root()
+
+
+def test_resolve_ignores_commented_and_empty_override(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_WATCH_LIBRARY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("# CLAUDE_WATCH_LIBRARY=/nope\nCLAUDE_WATCH_LIBRARY=\n")
+    monkeypatch.setattr("scripts.library.CONFIG_ENV_PATH", env_file)
+    monkeypatch.setattr("scripts.library.LEGACY_LIBRARY_ROOT", tmp_path / "no-legacy")
+    assert resolve_library_root() == default_library_root()
+
+
+def test_resolve_whitespace_only_env_var_is_ignored(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_WATCH_LIBRARY", "   ")
+    monkeypatch.setattr("scripts.library.CONFIG_ENV_PATH", tmp_path / "absent.env")
+    monkeypatch.setattr("scripts.library.LEGACY_LIBRARY_ROOT", tmp_path / "no-legacy")
+    assert resolve_library_root() == default_library_root()
+
+
+def test_default_library_root_windows_falls_back_without_localappdata(monkeypatch):
+    monkeypatch.setattr("scripts.library.platform.system", lambda: "Windows")
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    expected = Path.home() / "AppData" / "Local" / "claude-watch" / "library"
+    assert default_library_root() == expected
+
+
+def test_resolve_strips_inline_comment_in_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_WATCH_LIBRARY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "CLAUDE_WATCH_LIBRARY=" + str(tmp_path / "real") + "  # set by installer\n"
+    )
+    monkeypatch.setattr("scripts.library.CONFIG_ENV_PATH", env_file)
+    monkeypatch.setattr("scripts.library.LEGACY_LIBRARY_ROOT", tmp_path / "no-legacy")
+    assert resolve_library_root() == tmp_path / "real"
+
+
+def test_resolve_survives_non_utf8_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_WATCH_LIBRARY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(b"CLAUDE_WATCH_LIBRARY=\xff\xfe broken \x80\n")
+    monkeypatch.setattr("scripts.library.CONFIG_ENV_PATH", env_file)
+    monkeypatch.setattr("scripts.library.LEGACY_LIBRARY_ROOT", tmp_path / "no-legacy")
+    assert resolve_library_root() == default_library_root()
+
+
+def test_resolve_last_definition_wins_in_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUDE_WATCH_LIBRARY", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "CLAUDE_WATCH_LIBRARY=" + str(tmp_path / "old") + "\n"
+        "CLAUDE_WATCH_LIBRARY=" + str(tmp_path / "new") + "\n"
+    )
+    monkeypatch.setattr("scripts.library.CONFIG_ENV_PATH", env_file)
+    monkeypatch.setattr("scripts.library.LEGACY_LIBRARY_ROOT", tmp_path / "no-legacy")
+    assert resolve_library_root() == tmp_path / "new"
 
 
 def test_cache_lookup_returns_none_when_missing(tmp_path, monkeypatch):

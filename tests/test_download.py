@@ -1,6 +1,8 @@
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from scripts.download import download_video, copy_local, format_selector
 
 
@@ -40,3 +42,22 @@ def test_copy_local_symlinks_into_library(tmp_path):
     assert result.is_symlink() or result.is_file()
     assert result.exists()
     assert result.read_bytes() == b"data"
+
+
+def test_copy_local_rejects_directory_source(tmp_path):
+    src_dir = tmp_path / "not-a-file"
+    src_dir.mkdir()
+    dst_dir = tmp_path / "src"
+    dst_dir.mkdir()
+    with pytest.raises(RuntimeError, match="not a regular file"):
+        copy_local(src_dir, dst_dir, basename="video")
+
+
+def test_copy_local_rejects_non_video_extension(tmp_path):
+    src = tmp_path / "secrets.txt"
+    src.write_text("not a video")
+    dst_dir = tmp_path / "src"
+    dst_dir.mkdir()
+    with pytest.raises(RuntimeError, match="does not look like a video"):
+        copy_local(src, dst_dir, basename="video")
+    assert not (dst_dir / "video.txt").exists()

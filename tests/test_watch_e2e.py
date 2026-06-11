@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.watch import _scheme_ok, _validate_slides_args, _validate_slides_focus
+from scripts.watch import _scheme_ok, _validate_slides_args, _validate_slides_focus, _wipe_frames_dir
 
 ROOT = Path(__file__).parent.parent
 FIXTURE = ROOT / "tests" / "fixtures" / "sample_10s.mp4"
@@ -41,6 +41,26 @@ def test_validate_slides_args_threshold_range():
     with pytest.raises(SystemExit):
         _validate_slides_args(scene_threshold=0.1, phash_dist=99)
     _validate_slides_args(scene_threshold=0.1, phash_dist=5)
+
+
+def test_wipe_frames_dir_refuses_paths_outside_library_root(tmp_path, monkeypatch):
+    monkeypatch.setattr("scripts.library.LIBRARY_ROOT", tmp_path / "library")
+    outside = tmp_path / "elsewhere" / "frames"
+    outside.mkdir(parents=True)
+    (outside / "precious.txt").write_text("keep me")
+    with pytest.raises(SystemExit):
+        _wipe_frames_dir(outside)
+    assert (outside / "precious.txt").exists()
+
+
+def test_wipe_frames_dir_clears_inside_library_root(tmp_path, monkeypatch):
+    root = tmp_path / "library"
+    monkeypatch.setattr("scripts.library.LIBRARY_ROOT", root)
+    frames = root / "slug" / "frames"
+    frames.mkdir(parents=True)
+    (frames / "0001.jpg").write_text("x")
+    _wipe_frames_dir(frames)
+    assert list(frames.iterdir()) == []
 
 
 @pytest.mark.integration

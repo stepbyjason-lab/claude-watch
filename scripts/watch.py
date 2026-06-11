@@ -74,8 +74,14 @@ def _validate_slides_focus(*, slides: bool, focus) -> None:
 
 
 def _wipe_frames_dir(frames_dir: Path) -> None:
-    if frames_dir.exists():
-        for f in frames_dir.iterdir():
+    # Containment guard: LIBRARY_ROOT is user-configurable (env var / .env /
+    # --out-dir), so never delete outside the resolved library root.
+    resolved = frames_dir.resolve()
+    root = lib.LIBRARY_ROOT.resolve()
+    if not resolved.is_relative_to(root):
+        sys.exit(f"refusing to wipe {resolved}: outside library root {root}")
+    if resolved.exists():
+        for f in resolved.iterdir():
             f.unlink()
 
 
@@ -173,7 +179,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-gap", type=float, default=45.0, help="coverage floor seconds")
     p.add_argument("--whisper", choices=["groq", "openai"], help="force Whisper backend")
     p.add_argument("--no-whisper", action="store_true", help="disable Whisper fallback")
-    p.add_argument("--out-dir", help="library root (default: ~/claude-watch/library)")
+    p.add_argument("--out-dir", help="library root override — takes precedence over the "
+                   "CLAUDE_WATCH_LIBRARY env var/config (default: the OS app-data dir, "
+                   "e.g. %%LOCALAPPDATA%%\\claude-watch\\library on Windows)")
     p.add_argument("--slides", action="store_true",
                    help="slide-deck mode: high-recall capture of a prepared deck")
     p.add_argument("--cam-corner", choices=["tr", "tl", "br", "bl", "none"], default="tr",

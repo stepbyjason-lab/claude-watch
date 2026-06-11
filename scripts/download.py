@@ -40,11 +40,29 @@ def download_video(
     return matches[0]
 
 
+_VIDEO_EXTS = {
+    ".avi", ".flv", ".m4v", ".mkv", ".mov", ".mp4",
+    ".mpeg", ".mpg", ".ts", ".webm", ".wmv",
+}
+
+
 def copy_local(src: Path, out_dir: Path, *, basename: str = "video") -> Path:
     """For local sources, symlink (cheap, no copy) into out_dir/<basename>.<ext>.
-    Falls back to a regular file copy if symlink fails."""
+    Falls back to a regular file copy if symlink fails.
+
+    The created symlink is followed by every later pipeline stage, so the
+    resolved source must be a regular file with a plausible video extension —
+    refuse directories, devices, and links to unrelated files."""
     out_dir.mkdir(parents=True, exist_ok=True)
     src = src.expanduser().resolve()
+    if not src.is_file():
+        raise RuntimeError(f"local source is not a regular file: {src}")
+    if src.suffix.lower() not in _VIDEO_EXTS:
+        raise RuntimeError(
+            f"local source does not look like a video file "
+            f"({src.suffix or 'no extension'}): {src}; "
+            f"expected one of: {', '.join(sorted(_VIDEO_EXTS))}"
+        )
     dst = out_dir / f"{basename}{src.suffix}"
     if dst.exists() or dst.is_symlink():
         dst.unlink()

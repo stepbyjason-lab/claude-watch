@@ -3,12 +3,78 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import platform
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-LIBRARY_ROOT = Path.home() / "claude-watch" / "library"
+CONFIG_ENV_PATH = Path.home() / ".config" / "claude-watch" / ".env"
+LEGACY_LIBRARY_ROOT = Path.home() / "claude-watch" / "library"
+
+
+def default_library_root() -> Path:
+    """Platform-standard app-data location for the library."""
+    sysname = platform.system()
+    if sysname == "Windows":
+        base = os.environ.get("LOCALAPPDATA")
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+    elif sysname == "Darwin":
+        root = Path.home() / "Library" / "Application Support"
+    else:
+        base = os.environ.get("XDG_DATA_HOME")
+        root = Path(base) if base else Path.home() / ".local" / "share"
+    return root / "claude-watch" / "library"
+
+
+def _env_file_override() -> str | None:
+    """CLAUDE_WATCH_LIBRARY value from ~/.config/claude-watch/.env, if set.
+
+    Last definition wins (shell semantics); quotes and trailing `# comments`
+    are stripped. An unreadable or non-UTF-8 file is treated as absent rather
+    than crashing at import time.
+    """
+    if not CONFIG_ENV_PATH.exists():
+        return None
+    try:
+        raw = CONFIG_ENV_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    value: str | None = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == "CLAUDE_WATCH_LIBRARY":
+            v = re.split(r"\s+#", v, maxsplit=1)[0]
+            v = v.strip().strip('"').strip("'")
+            value = v or None
+    return value
+
+
+def resolve_library_root() -> Path:
+    """Resolve the library root.
+
+    Priority (highest first): the CLAUDE_WATCH_LIBRARY environment variable,
+    the same key in ~/.config/claude-watch/.env, the legacy
+    ~/claude-watch/library if it already exists (pre-relocation installs keep
+    working untouched), then the platform-standard app-data dir. The --out-dir
+    CLI flag overrides all of these (handled in watch.py).
+    """
+    env_value = (os.environ.get("CLAUDE_WATCH_LIBRARY") or "").strip()
+    if env_value:
+        return Path(env_value).expanduser()
+    file_value = _env_file_override()
+    if file_value:
+        return Path(file_value).expanduser()
+    if LEGACY_LIBRARY_ROOT.is_dir():
+        return LEGACY_LIBRARY_ROOT
+    return default_library_root()
+
+
+LIBRARY_ROOT = resolve_library_root()
 
 _SLUG_BAD = re.compile(r"[^a-z0-9]+")
 

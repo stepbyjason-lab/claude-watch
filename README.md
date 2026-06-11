@@ -30,7 +30,13 @@
    - `## Frameworks…`, `## Examples and Applications`, `## Caveats and Open Questions`
    - `## Code & Commands` — code-on-screen transcribed into runnable blocks
    - `## Slide Coverage Ledger` — every extracted slide/scene accounted for with `[t]` + frame links
-5. Saves everything to `~/claude-watch/library/<slug>/` — re-running the same URL is a cache hit.
+5. Saves everything to the library at `<library-root>/<slug>/` — re-running the same URL is a cache hit.
+   The library root defaults to the OS app-data dir (Windows `%LOCALAPPDATA%\claude-watch\library`,
+   macOS `~/Library/Application Support/claude-watch/library`, Linux `$XDG_DATA_HOME` or
+   `~/.local/share/claude-watch/library`). To override — highest priority first — use the
+   `--out-dir` flag per run, the `CLAUDE_WATCH_LIBRARY` environment variable, or the same key in
+   `~/.config/claude-watch/.env`. Installs that already have the legacy `~/claude-watch/library`
+   keep using it untouched (any override above still wins).
 
 ## Why this exists
 
@@ -103,7 +109,7 @@ Captions cover the majority of public videos for free. Whisper only kicks in whe
 | Whisper fallback (alt) | OpenAI `whisper-1` |
 | Disable Whisper | `--no-whisper` (frames-only when no captions) |
 
-Keys go in `~/.config/claude-watch/.env` (mode 0600).
+Keys go in `~/.config/claude-watch/.env` (mode 0600 on Unix; Windows does not enforce this — restrict the file with filesystem ACLs yourself if the machine is shared).
 
 ## Re-running the same video
 

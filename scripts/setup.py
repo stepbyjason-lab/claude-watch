@@ -18,9 +18,17 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# When invoked as `python scripts/setup.py` the repo root is not automatically
+# on sys.path.  Insert it so that `from scripts import …` works correctly
+# regardless of how the script is launched.
+_ROOT = Path(__file__).parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from scripts.library import resolve_library_root
+
 CONFIG_DIR = Path.home() / ".config" / "claude-watch"
 ENV_PATH = CONFIG_DIR / ".env"
-LIBRARY_ROOT = Path.home() / "claude-watch" / "library"
 REQUIRED_BINS = ("ffmpeg", "ffprobe", "yt-dlp")
 
 
@@ -32,7 +40,7 @@ def _read_env() -> dict[str, str]:
     """Read CONFIG_DIR/.env if present. Falls back to process env if file absent."""
     env: dict[str, str] = {}
     if ENV_PATH.exists():
-        for line in ENV_PATH.read_text().splitlines():
+        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -77,7 +85,7 @@ def exit_code_for(status: str) -> int:
 
 def _scaffold_env() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    LIBRARY_ROOT.mkdir(parents=True, exist_ok=True)
+    resolve_library_root().mkdir(parents=True, exist_ok=True)
     if ENV_PATH.exists():
         return
     ENV_PATH.write_text(
@@ -86,7 +94,10 @@ def _scaffold_env() -> None:
         "# Or OpenAI: https://platform.openai.com/api-keys\n"
         "# GROQ_API_KEY=\n"
         "# OPENAI_API_KEY=\n"
-        "SETUP_COMPLETE=false\n"
+        "# Library location override (optional — defaults to the OS app-data dir):\n"
+        "# CLAUDE_WATCH_LIBRARY=/path/to/library\n"
+        "SETUP_COMPLETE=false\n",
+        encoding="utf-8",
     )
     os.chmod(ENV_PATH, 0o600)
 

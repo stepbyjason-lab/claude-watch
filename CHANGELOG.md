@@ -10,9 +10,16 @@ Additive changes on top of upstream `devinilabs/claude-watch`. Classic extractio
 - **`--slides` mode** — high-recall capture of a lecture deck (aims for every prepared slide; fast-flips and visually-similar slides can still be missed — see [`docs/dogfood/2026-06-05-detailpage-slides.md`](docs/dogfood/2026-06-05-detailpage-slides.md)): crops out the presenter cam + caption, scene-detects on the slide region at a low threshold, and conservatively deduplicates near-identical frames via a zero-dependency `ffmpeg` 9×8 **difference (edge) hash** — chosen over an average hash because it tells apart monochrome text slides on white decks, where an average hash collapses them (borderline pairs are kept and flagged, not silently dropped). Native 720p extraction. Flags: `--slides`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`.
 - **Slides end-of-video tail anchor** — `apply_coverage_floor(..., include_tail_anchor=True)` (slides mode opts in; classic mode keeps the upstream default, byte-identical) adds one extractable floor candidate near `duration − 0.5s`, so the final slide — shown past the last coverage step, too late to register as a scene cut — gets coverage. Validated on a 38-min white deck (last slide recovered, 25 → 26); for dense text decks `--scene-threshold 0.15 --phash-dist 2` lifts capture further (25 → 31) without ballooning. Evidence: [`docs/dogfood/2026-06-05-harness-dhash-validation.md`](docs/dogfood/2026-06-05-harness-dhash-validation.md).
 - Slides cache identity: the full detection profile is folded into the slug (any slide flag change re-runs cleanly); default-mode slugs hash identically to upstream.
-- Hardening: `-protocol_whitelist file` on all ffmpeg inputs, `urlparse`-based source-scheme allowlist, candidate-frame cap, and UTF-8 stdout/stderr (no cp949 crash on Windows).
+- Hardening: `-protocol_whitelist file` on all ffmpeg inputs, `urlparse`-based source-scheme allowlist, candidate-frame cap, UTF-8 stdout/stderr (no cp949 crash on Windows), frames-wipe containment guard (never deletes outside the resolved library root), and local-source validation (`copy_local` refuses non-files and non-video extensions before creating the library symlink).
 
 ### Changed
+- **Library root relocated to the OS app-data dir.** The hardcoded `~/claude-watch/library`
+  (a folder dumped into the home-directory root on every platform) is replaced by a resolver:
+  Windows `%LOCALAPPDATA%\claude-watch\library`, macOS `~/Library/Application Support/claude-watch/library`,
+  Linux `$XDG_DATA_HOME` (or `~/.local/share`) `/claude-watch/library`. Override order:
+  `--out-dir` flag > `CLAUDE_WATCH_LIBRARY` env var > the same key in `~/.config/claude-watch/.env` >
+  legacy `~/claude-watch/library` if it already exists (existing installs keep working untouched) >
+  platform default. `setup.py` scaffolds the new `.env` key as a commented hint.
 - **Notes are now concept-first.** The scene-first "one scene/slide = one section" template (On screen + Said + Synthesis per scene) was replaced by a concept-first study-notes contract: core thesis, concept map, learning path, frameworks/examples/caveats, inline visual evidence with captions, and a slide coverage ledger — gated by a pre-write quality check. Screenshots and timestamps are evidence, not the main structure. Script/extraction output is unchanged.
 
 ### Docs
