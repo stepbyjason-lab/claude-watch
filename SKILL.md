@@ -1,6 +1,6 @@
 ---
 name: claude-watch
-description: Watch a tutorial or lecture video (URL or local path) and produce concept-first study notes. Downloads with yt-dlp, detects scene or slide changes with ffmpeg, pulls a timestamped transcript (captions or Whisper API fallback), and writes synthesized markdown notes with inline visual evidence and timestamped traceability to the claude-watch library (OS app-data dir by default; --out-dir or CLAUDE_WATCH_LIBRARY overrides).
+description: Watch a tutorial or lecture video (URL or local path) and produce concept-first study notes. Downloads with yt-dlp, detects scene or slide changes with ffmpeg, pulls a timestamped transcript (captions, or local/cloud Whisper fallback), and writes synthesized markdown notes with inline visual evidence and timestamped traceability to the claude-watch library (OS app-data dir by default; --out-dir or CLAUDE_WATCH_LIBRARY overrides).
 argument-hint: "<video-url-or-path> [topic-or-question]"
 allowed-tools: Bash, Read, Write, AskUserQuestion
 homepage: https://github.com/devinilabs/claude-watch
@@ -29,7 +29,7 @@ python3 "${CLAUDE_SKILL_DIR}/scripts/setup.py"
 
 On macOS this auto-`brew install`s ffmpeg + yt-dlp. On Linux/Windows it prints the right commands. It scaffolds `~/.config/claude-watch/.env` (mode 0600 on Unix; not enforced on Windows) with commented placeholders.
 
-If a Whisper key is still missing afterwards, use `AskUserQuestion` to ask whether the user has a Groq key (preferred — cheaper, faster) or an OpenAI key, and write it to `~/.config/claude-watch/.env`. If they don't want to, run with `--no-whisper`; videos without native captions will come back frames-only.
+A Whisper key is optional: if a local Whisper is installed (`whisper` or `whisper-ctranslate2` on PATH, or `WHISPER_LOCAL_CMD` set), it's used first and `setup.py --check` reports `whisper_backend: local` / `status: ready` with no key. Only if no local Whisper AND no key is found, use `AskUserQuestion` to ask whether the user has a Groq key (preferred — cheaper, faster) or an OpenAI key, and write it to `~/.config/claude-watch/.env`. If they want neither, run with `--no-whisper`; videos without native captions will come back frames-only.
 
 ## When to use
 
@@ -64,7 +64,7 @@ Optional flags:
 - `--resolution W` — bump frame width to 1024 px when on-screen text is tiny
 - `--scene-threshold X` — sensitivity (default 0.30; raise for fewer cuts, lower for more)
 - `--max-gap S` — coverage floor in seconds (default 45)
-- `--whisper groq|openai` — force backend
+- `--whisper local|groq|openai` — force backend (`local` = a PATH whisper CLI or `WHISPER_LOCAL_CMD`; auto-preferred over the cloud when available)
 - `--no-whisper` — disable Whisper entirely
 - `--out-dir DIR` — override library root
 - `--slides` — **slide-deck mode**: high-recall capture of a prepared deck (see *Slides mode* below)
@@ -223,7 +223,7 @@ If the user re-watches the same URL, the script reuses the cached download, tran
 - **Setup preflight non-zero** → run `setup.py`, then ask for a key via `AskUserQuestion`.
 - **No transcript** → script emits `transcript_source: none`. Generate notes frames-only and tell the user.
 - **Long video sparse-scan warning** → offer to re-run with `--start`/`--end` focused on the part the user cares about.
-- **Whisper failure** → retry with `--whisper openai` (if Groq failed) or vice versa.
+- **Whisper failure** → an auto-picked local Whisper that fails already falls back to the cloud automatically; otherwise retry with `--whisper openai` (if Groq failed) or vice versa. A forced `--whisper local` that's unavailable prints a notice and skips transcription (frames-only).
 
 ## Token budget
 
@@ -234,7 +234,7 @@ If the user asks a follow-up about a video you already watched in this session, 
 ## Security
 
 - Runs `yt-dlp`, `ffmpeg`, `ffprobe` locally
-- Sends extracted mono 16 kHz audio to Groq (preferred) or OpenAI Whisper API only when captions are missing
+- Extracts mono 16 kHz audio only when captions are missing. A local Whisper (if installed) transcribes it on-device — nothing leaves the machine; otherwise the audio is sent to the Groq or OpenAI Whisper API. `WHISPER_LOCAL_CMD` runs a user-configured command with `subprocess` (no shell), so only commands the user themselves set in their env/config are executed
 - Reads/writes `~/.config/claude-watch/.env` for keys (mode 0600 on Unix; Windows does not enforce file modes — protect the file with ACLs on shared machines)
 - Persists artifacts to the library root (default: the OS app-data dir, e.g. `%LOCALAPPDATA%\claude-watch\library` on Windows; override — highest priority first — `--out-dir`, the `CLAUDE_WATCH_LIBRARY` env var, or the same key in `~/.config/claude-watch/.env`; pre-existing legacy `~/claude-watch/library` keeps working) — review the directory after first run if you're cautious
 - Does NOT log or transmit API keys, video files, or the original URL outside the audio-to-Whisper call

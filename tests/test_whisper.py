@@ -5,6 +5,8 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from scripts.whisper import (
+    detect_local_whisper,
+    parse_local_cmd,
     pick_backend,
     transcribe_groq,
     transcribe_openai,
@@ -14,6 +16,74 @@ from scripts.whisper import (
 
 def test_pick_backend_prefers_groq_when_both_keys_set():
     assert pick_backend(groq_key="g", openai_key="o", forced=None) == "groq"
+
+
+def test_pick_backend_prefers_local_over_cloud():
+    assert pick_backend(groq_key="g", openai_key="o", forced=None, local_available=True) == "local"
+
+
+def test_pick_backend_local_when_no_keys():
+    assert pick_backend(groq_key=None, openai_key=None, forced=None, local_available=True) == "local"
+
+
+def test_pick_backend_forced_local_with_local():
+    assert pick_backend(groq_key="g", openai_key=None, forced="local", local_available=True) == "local"
+
+
+def test_pick_backend_forced_local_without_local_returns_none():
+    assert pick_backend(groq_key="g", openai_key=None, forced="local", local_available=False) is None
+
+
+def test_pick_backend_forced_cloud_ignores_local():
+    assert pick_backend(groq_key="g", openai_key=None, forced="groq", local_available=True) == "groq"
+
+
+def test_parse_local_cmd_none_and_empty():
+    assert parse_local_cmd(None) is None
+    assert parse_local_cmd("") is None
+    assert parse_local_cmd("   ") is None
+
+
+def test_parse_local_cmd_splits_tokens():
+    assert parse_local_cmd("python transcribe.py") == ["python", "transcribe.py"]
+
+
+def test_parse_local_cmd_preserves_windows_backslash_paths():
+    with patch("scripts.whisper.os.name", "nt"):
+        result = parse_local_cmd(r"C:\venv\python.exe C:\tools\w.py {audio} --outdir {outdir}")
+    assert result == [r"C:\venv\python.exe", r"C:\tools\w.py", "{audio}", "--outdir", "{outdir}"]
+
+
+def test_parse_local_cmd_unbalanced_quote_returns_none():
+    # An unmatched quote must not raise (ValueError) — it degrades to None so the
+    # caller falls back instead of crashing the pipeline.
+    with patch("scripts.whisper.os.name", "posix"):
+        assert parse_local_cmd('python w.py "unterminated') is None
+
+
+def test_detect_local_whisper_env_override_wins():
+    spec = detect_local_whisper({"WHISPER_LOCAL_CMD": "py w.py {audio} --outdir {outdir}"},
+                                which=lambda _: "/usr/bin/whisper")
+    assert spec == {"kind": "custom", "template": "py w.py {audio} --outdir {outdir}"}
+
+
+def test_detect_local_whisper_finds_path_cli():
+    spec = detect_local_whisper({}, which=lambda n: "/usr/bin/whisper" if n == "whisper" else None)
+    assert spec["kind"] == "cli"
+    assert spec["bin"] == "/usr/bin/whisper"
+    assert spec["model"] == "base"
+
+
+def test_detect_local_whisper_honors_model_env():
+    spec = detect_local_whisper({"WHISPER_MODEL": "large-v3"},
+                                which=lambda n: "/usr/bin/whisper-ctranslate2"
+                                if n == "whisper-ctranslate2" else None)
+    assert spec["model"] == "large-v3"
+    assert spec["bin"].endswith("whisper-ctranslate2")
+
+
+def test_detect_local_whisper_none_when_nothing_available():
+    assert detect_local_whisper({}, which=lambda _: None) is None
 
 
 def test_pick_backend_falls_back_to_openai():

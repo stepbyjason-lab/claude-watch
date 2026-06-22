@@ -25,10 +25,25 @@ def test_status_for_flags_missing_binaries():
 
 
 def test_status_for_flags_missing_key():
-    with patch.object(setup_mod, "_which", side_effect=lambda x: f"/bin/{x}"):
+    # Required bins present, but no cloud key AND no local Whisper on PATH.
+    def fake_which(x):
+        return f"/bin/{x}" if x in setup_mod.REQUIRED_BINS else None
+    with patch.object(setup_mod, "_which", side_effect=fake_which):
         with patch.object(setup_mod, "_read_env", return_value={}):
             s = setup_mod.status_for()
     assert s["status"] == "needs_key"
+    assert s["has_api_key"] is False
+
+
+def test_status_for_ready_with_local_whisper_on_path_no_key():
+    """General-user path: `whisper` on PATH satisfies transcription, no key needed."""
+    def fake_which(x):
+        return f"/bin/{x}" if x in (*setup_mod.REQUIRED_BINS, "whisper") else None
+    with patch.object(setup_mod, "_which", side_effect=fake_which):
+        with patch.object(setup_mod, "_read_env", return_value={}):
+            s = setup_mod.status_for()
+    assert s["status"] == "ready"
+    assert s["whisper_backend"] == "local"
     assert s["has_api_key"] is False
 
 
@@ -37,6 +52,19 @@ def test_status_for_combines_when_both_missing():
         with patch.object(setup_mod, "_read_env", return_value={}):
             s = setup_mod.status_for()
     assert s["status"] == "needs_install_and_key"
+
+
+def test_read_env_passes_whisper_model_from_os_environ(tmp_path, monkeypatch):
+    """WHISPER_MODEL set in the OS environment (no .env file) must reach the env dict
+    so detect_local_whisper can honor it."""
+    from scripts import whisper
+    monkeypatch.setattr(setup_mod, "ENV_PATH", tmp_path / "does-not-exist.env")
+    monkeypatch.setenv("WHISPER_MODEL", "large-v3")
+    monkeypatch.delenv("WHISPER_LOCAL_CMD", raising=False)
+    env = setup_mod._read_env()
+    assert env.get("WHISPER_MODEL") == "large-v3"
+    spec = whisper.detect_local_whisper(env, which=lambda n: "/usr/bin/whisper" if n == "whisper" else None)
+    assert spec["model"] == "large-v3"
 
 
 def test_check_exit_code_maps_status_to_table():

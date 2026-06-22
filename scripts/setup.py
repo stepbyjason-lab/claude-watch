@@ -26,6 +26,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from scripts.library import resolve_library_root
+from scripts import whisper
 
 CONFIG_DIR = Path.home() / ".config" / "claude-watch"
 ENV_PATH = CONFIG_DIR / ".env"
@@ -46,7 +47,8 @@ def _read_env() -> dict[str, str]:
                 continue
             k, _, v = line.partition("=")
             env[k.strip()] = v.strip().strip('"').strip("'")
-    for k in ("GROQ_API_KEY", "OPENAI_API_KEY", "SETUP_COMPLETE"):
+    for k in ("GROQ_API_KEY", "OPENAI_API_KEY", "WHISPER_LOCAL_CMD",
+              "WHISPER_MODEL", "SETUP_COMPLETE"):
         if k in os.environ and not env.get(k):
             env[k] = os.environ[k]
     return env
@@ -56,11 +58,13 @@ def status_for() -> dict:
     missing = [b for b in REQUIRED_BINS if not _which(b)]
     env = _read_env()
     has_key = bool(env.get("GROQ_API_KEY") or env.get("OPENAI_API_KEY"))
-    if missing and not has_key:
+    has_local = whisper.detect_local_whisper(env, which=_which) is not None
+    has_transcriber = has_key or has_local
+    if missing and not has_transcriber:
         status = "needs_install_and_key"
     elif missing:
         status = "needs_install"
-    elif not has_key:
+    elif not has_transcriber:
         status = "needs_key"
     else:
         status = "ready"
@@ -69,7 +73,8 @@ def status_for() -> dict:
         "missing_binaries": missing,
         "has_api_key": has_key,
         "whisper_backend": (
-            "groq" if env.get("GROQ_API_KEY")
+            "local" if has_local
+            else "groq" if env.get("GROQ_API_KEY")
             else "openai" if env.get("OPENAI_API_KEY")
             else None
         ),
@@ -94,6 +99,14 @@ def _scaffold_env() -> None:
         "# Or OpenAI: https://platform.openai.com/api-keys\n"
         "# GROQ_API_KEY=\n"
         "# OPENAI_API_KEY=\n"
+        "# Local Whisper is preferred over the cloud backends automatically:\n"
+        "#  - If `whisper` or `whisper-ctranslate2` is on PATH, it's used as-is.\n"
+        "#  - Override with a custom command via WHISPER_LOCAL_CMD (also read from\n"
+        "#    the OS environment, so other tools can share it). {audio}/{outdir}\n"
+        "#    placeholders are filled; otherwise `<audio> --outdir <dir>` is appended.\n"
+        "#    The command must write an .srt into the output dir.\n"
+        "# WHISPER_LOCAL_CMD=/path/to/venv/python /path/to/transcribe.py {audio} --outdir {outdir}\n"
+        "# WHISPER_MODEL=base   # model for an auto-detected PATH CLI\n"
         "# Library location override (optional — defaults to the OS app-data dir):\n"
         "# CLAUDE_WATCH_LIBRARY=/path/to/library\n"
         "SETUP_COMPLETE=false\n",

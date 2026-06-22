@@ -1,12 +1,15 @@
-"""Stdlib HTTP clients for Groq and OpenAI Whisper APIs."""
+"""Stdlib HTTP clients for Groq and OpenAI Whisper APIs + local-command bridge."""
 from __future__ import annotations
 
 import json
 import mimetypes
+import os
+import shlex
+import shutil
 import uuid
 from pathlib import Path
-from typing import Optional
-from urllib.error import URLError, HTTPError
+from typing import Callable, Literal, Optional, TypedDict, Union
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 
@@ -15,9 +18,80 @@ GROQ_MODEL = "whisper-large-v3"
 OPENAI_URL = "https://api.openai.com/v1/audio/transcriptions"
 OPENAI_MODEL = "whisper-1"
 
+# Standard local Whisper CLIs probed on PATH, in preference order. Both
+# openai-whisper (`whisper`) and the faster-whisper CLI (`whisper-ctranslate2`)
+# share the same `--model / --output_dir / --output_format / --language` flags.
+_PATH_WHISPER_CLIS = ("whisper", "whisper-ctranslate2")
+DEFAULT_LOCAL_MODEL = "base"
+
+
+class CliSpec(TypedDict):
+    """A standard Whisper CLI auto-detected on PATH."""
+    kind: Literal["cli"]
+    bin: str
+    model: str
+
+
+class CustomSpec(TypedDict):
+    """A user-configured command from WHISPER_LOCAL_CMD."""
+    kind: Literal["custom"]
+    template: str
+
+
+# How transcribe.transcribe_local should invoke a local Whisper.
+LocalSpec = Union[CliSpec, CustomSpec]
+
 
 class WhisperError(Exception):
     pass
+
+
+def parse_local_cmd(raw: Optional[str]) -> Optional[list[str]]:
+    """Split a WHISPER_LOCAL_CMD string into argv tokens, or None if unset.
+
+    On Windows we split with posix=False so backslash paths survive intact
+    (e.g. ``C:\\venv\\python.exe C:\\tools\\transcribe.py``).
+    """
+    if not raw or not raw.strip():
+        return None
+    try:
+        tokens = shlex.split(raw.strip(), posix=(os.name != "nt"))
+    except ValueError:
+        # Unbalanced quote etc. — treat as unparseable rather than crashing the
+        # pipeline; the caller surfaces this as a WhisperError and falls back.
+        return None
+    return tokens or None
+
+
+def detect_local_whisper(
+    env: dict, *, which: Callable[[str], Optional[str]] = shutil.which
+) -> Optional[LocalSpec]:
+    """Resolve how to run a local Whisper, or None if none is available.
+
+    Precedence:
+      1. ``WHISPER_LOCAL_CMD`` env var — a custom command. May contain
+         ``{audio}`` / ``{outdir}`` placeholders; otherwise the audio path and
+         ``--outdir <dir>`` are appended. Works with any wrapper or CLI.
+      2. A standard Whisper CLI on PATH (``whisper`` then ``whisper-ctranslate2``),
+         invoked with ``--model <m> --output_dir <dir> --output_format srt`` and
+         automatic language detection.
+
+    Returns a spec dict consumed by ``transcribe.transcribe_local``:
+      ``{"kind": "custom", "template": str}`` or
+      ``{"kind": "cli", "bin": str, "model": str}``.
+    """
+    raw = env.get("WHISPER_LOCAL_CMD")
+    if raw and raw.strip():
+        return {"kind": "custom", "template": raw.strip()}
+    for exe in _PATH_WHISPER_CLIS:
+        found = which(exe)
+        if found:
+            return {
+                "kind": "cli",
+                "bin": found,
+                "model": env.get("WHISPER_MODEL") or DEFAULT_LOCAL_MODEL,
+            }
+    return None
 
 
 def pick_backend(
@@ -25,15 +99,22 @@ def pick_backend(
     groq_key: Optional[str],
     openai_key: Optional[str],
     forced: Optional[str],
+    local_available: bool = False,
 ) -> Optional[str]:
-    """Return 'groq', 'openai', or None.
+    """Return 'local', 'groq', 'openai', or None.
 
-    Forced backend wins iff its key is present. Otherwise prefer Groq, then OpenAI.
+    Forced backend wins iff its prerequisite is present (a local Whisper for
+    'local', the matching key for the cloud backends). Otherwise prefer a local
+    Whisper, then Groq, then OpenAI.
     """
+    if forced == "local":
+        return "local" if local_available else None
     if forced == "groq":
         return "groq" if groq_key else None
     if forced == "openai":
         return "openai" if openai_key else None
+    if local_available:
+        return "local"
     if groq_key:
         return "groq"
     if openai_key:

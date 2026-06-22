@@ -22,7 +22,7 @@
 
 1. Downloads via `yt-dlp` (or accepts a local file).
 2. Detects scene changes with `ffmpeg`. Inserts coverage-floor frames every 45s across long static gaps so a lecture with one slide for 5 minutes still gets ~7 frames, not 1.
-3. Pulls a timestamped transcript — captions first (free), Whisper API (Groq preferred, OpenAI alt) only when missing.
+3. Pulls a timestamped transcript — captions first (free), then a local Whisper (if installed — free, offline, preferred), then the Whisper API (Groq, OpenAI) — only when missing.
 4. Hands frames + transcript to Claude as raw evidence. Claude `Read`s every frame and writes `notes.md` as a **concept-first study document** — not a screen-by-screen log:
    - `## TLDR` + `## Core Thesis` — the main argument and why it matters
    - `## Concept Map` — concepts with timestamped evidence
@@ -88,7 +88,7 @@ Run the suite with `python -m pytest -m "not network"`.
 /claude-watch <url> --slides                     # lecture-deck mode
 ```
 
-Flags: `--start/--end`, `--max-frames`, `--resolution`, `--scene-threshold`, `--max-gap`, `--whisper groq|openai`, `--no-whisper`, `--out-dir`.
+Flags: `--start/--end`, `--max-frames`, `--resolution`, `--scene-threshold`, `--max-gap`, `--whisper local|groq|openai`, `--no-whisper`, `--out-dir`.
 
 Slides flags: `--slides`, `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`.
 
@@ -105,11 +105,20 @@ Captions cover the majority of public videos for free. Whisper only kicks in whe
 | Need | Cost |
 |---|---|
 | Download + native captions | free (`yt-dlp` + `ffmpeg`) |
-| Whisper fallback (preferred) | Groq `whisper-large-v3` — cheap, fast |
-| Whisper fallback (alt) | OpenAI `whisper-1` |
+| Whisper fallback (preferred) | **local Whisper — free, offline** (auto-used when available) |
+| Whisper fallback (cloud) | Groq `whisper-large-v3` (cheap, fast), then OpenAI `whisper-1` |
 | Disable Whisper | `--no-whisper` (frames-only when no captions) |
 
-Keys go in `~/.config/claude-watch/.env` (mode 0600 on Unix; Windows does not enforce this — restrict the file with filesystem ACLs yourself if the machine is shared).
+**Local Whisper takes precedence over the cloud automatically.** If `whisper` (`pip install openai-whisper`) or `whisper-ctranslate2` (faster-whisper) is on your PATH, it's auto-detected and used — no key, no upload. Language is auto-detected; set `WHISPER_MODEL` to pick the model (default `base`). For an isolated venv or a custom wrapper that isn't on PATH, point `WHISPER_LOCAL_CMD` at it (it's also read from the OS environment, so other tools can share the same variable):
+
+```
+# A command that, given an audio path, writes <stem>.srt into an output dir.
+# {audio}/{outdir} are substituted; if absent, the audio path and `--outdir <dir>`
+# are appended. Example (faster-whisper wrapper in its own venv):
+WHISPER_LOCAL_CMD=/path/to/venv/python /path/to/transcribe.py {audio} --outdir {outdir}
+```
+
+If the local backend fails, claude-watch falls back to the cloud (unless you forced it with `--whisper local`). Cloud keys go in `~/.config/claude-watch/.env` (mode 0600 on Unix; Windows does not enforce this — restrict the file with filesystem ACLs yourself if the machine is shared).
 
 ## Re-running the same video
 
@@ -121,7 +130,7 @@ To force a fresh run, delete the `meta.json` in the library dir.
 
 - **Best accuracy: under ~30 minutes** for a single notes pass. Past that, use `--start`/`--end` to focus.
 - **Hard frame cap: 80** by default. Bump with `--max-frames` (token cost grows linearly).
-- **Whisper upload limit: 25 MB** (~50 min mono 16 kHz). Longer videos need captions.
+- **Cloud Whisper upload limit: 25 MB** (~50 min mono 16 kHz). Longer videos need captions or a local Whisper (no upload limit).
 - **No private platforms.** Public URLs and local files only.
 
 ## Develop
@@ -137,4 +146,4 @@ Releasing: tag `vX.Y.Z`, push the tag — CI builds and attaches `claude-watch.s
 
 ## License
 
-MIT. Built on `yt-dlp`, `ffmpeg`, and Claude's multimodal `Read` tool. Whisper transcription via [Groq](https://groq.com) or [OpenAI](https://openai.com).
+MIT. Built on `yt-dlp`, `ffmpeg`, and Claude's multimodal `Read` tool. Whisper transcription via a local install (openai-whisper / faster-whisper) or the [Groq](https://groq.com) / [OpenAI](https://openai.com) APIs.
