@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -6,10 +7,14 @@ from scripts.slides import (
     CandidateCapExceeded,
     build_crop_vf,
     detect_slides,
+    detect_slides_freeze,
     dhash,
     hamming,
+    parse_crop,
     phash_dedup,
     probe_dimensions,
+    validate_freeze_noise,
+    _freeze_periods,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_10s.mp4"
@@ -240,3 +245,181 @@ def test_detect_slides_enforces_candidate_cap_after_coverage_floor(tmp_path):
             candidate_cap=2,
         )
     assert not list(tmp_path.glob("*.jpg"))
+
+
+# ---- freeze-based slide capture ----
+
+def test_parse_crop_valid():
+    assert parse_crop("1840:1180:160:320") == (1840, 1180, 160, 320)
+    assert parse_crop("100:100:0:0") == (100, 100, 0, 0)
+
+
+@pytest.mark.parametrize("bad", ["1840:1180:160", "1840:1180:160:320:0", "a:b:c:d",
+                                  "0:100:0:0", "100:0:0:0", "100:100:-1:0", "100:100:0:-5"])
+def test_parse_crop_rejects_bad(bad):
+    with pytest.raises(ValueError):
+        parse_crop(bad)
+
+
+@pytest.mark.parametrize("ok", ["-50dB", "-60dB", "0", "0.003", "1", "1.0"])
+def test_validate_freeze_noise_accepts(ok):
+    assert validate_freeze_noise(ok) == ok
+
+
+@pytest.mark.parametrize("bad", ["-50", "abc", "50db", "2.0", "-1", "0.5x", "; rm -rf",
+                                  "12dB", "50dB", "0dB"])  # >=0 dB marks whole video frozen
+def test_validate_freeze_noise_rejects(bad):
+    with pytest.raises(ValueError):
+        validate_freeze_noise(bad)
+
+
+def _freeze_proc(stderr, rc=0):
+    return MagicMock(returncode=rc, stderr=stderr)
+
+
+def test_freeze_periods_pairs_start_and_duration():
+    stderr = (
+        "[freezedetect] lavfi.freezedetect.freeze_start: 10.0\n"
+        "[freezedetect] lavfi.freezedetect.freeze_duration: 4.0\n"
+        "[freezedetect] lavfi.freezedetect.freeze_end: 14.0\n"
+        "[freezedetect] lavfi.freezedetect.freeze_start: 30.0\n"
+        "[freezedetect] lavfi.freezedetect.freeze_duration: 8.0\n"
+        "[freezedetect] lavfi.freezedetect.freeze_end: 38.0\n"
+    )
+    with patch("scripts.slides.subprocess.run", return_value=_freeze_proc(stderr)):
+        out = _freeze_periods(Path("v.mp4"), crop_vf="", hold=3, noise="-50dB")
+    assert out == [(10.0, 4.0), (30.0, 8.0)]
+
+
+def test_freeze_periods_keeps_tail_when_frozen_at_eof():
+    stderr = (
+        "freeze_start: 10.0\nfreeze_duration: 4.0\nfreeze_end: 14.0\n"
+        "freeze_start: 50.0\n"  # no duration/end → still frozen at EOF
+    )
+    with patch("scripts.slides.subprocess.run", return_value=_freeze_proc(stderr)):
+        out = _freeze_periods(Path("v.mp4"), crop_vf="", hold=3, noise="-50dB")
+    assert out == [(10.0, 4.0), (50.0, None)]
+
+
+def test_freeze_periods_zero_events():
+    with patch("scripts.slides.subprocess.run", return_value=_freeze_proc("no freezes here")):
+        assert _freeze_periods(Path("v.mp4"), crop_vf="", hold=3, noise="-50dB") == []
+
+
+def test_freeze_periods_raises_on_ffmpeg_failure():
+    with patch("scripts.slides.subprocess.run", return_value=_freeze_proc("boom", rc=1)):
+        with pytest.raises(RuntimeError, match="freezedetect failed"):
+            _freeze_periods(Path("v.mp4"), crop_vf="", hold=3, noise="-50dB")
+
+
+def test_detect_slides_freeze_extracts_dedups_and_crops(tmp_path):
+    periods = [(10.0, 6.0), (30.0, 6.0), (50.0, None)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        assert crop_vf == "crop=100:100:0:0,"  # explicit crop forwarded to extraction
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    # frame 2 is near frame 1 (dist 1 <= drop_dist) → dropped; frame 3 is distinct.
+    # Inject hashes via a phash_dedup wrapper, because phash_dedup's default hash_fn is
+    # bound to the real dhash at def time (patching slides.dhash wouldn't reach it).
+    import scripts.slides as S
+    orig_dedup = S.phash_dedup
+    hashes = iter([0b0000, 0b0001, 0b1111_1111])
+
+    def fake_dedup(recs, *, crop_vf, drop_dist, flag_dist, hash_fn=None):
+        return orig_dedup(recs, crop_vf=crop_vf, drop_dist=drop_dist,
+                          flag_dist=flag_dist, hash_fn=lambda p, c="": next(hashes))
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=fake_dedup):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=5.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+        )
+    assert len(out["slides"]) == 2  # 3 extracted, 1 deduped
+    # The *correct* file survives: exactly the kept records' files remain on disk
+    # (a count-only check would pass even if a kept frame were wrongly deleted).
+    remaining = {p.name for p in tmp_path.glob("*.jpg")}
+    kept_names = {Path(s["path"]).name for s in out["slides"]}
+    assert remaining == kept_names
+
+
+def test_detect_slides_freeze_enforces_cap(tmp_path):
+    periods = [(float(i), 6.0) for i in range(5)]
+    with patch("scripts.slides._freeze_periods", return_value=periods):
+        with pytest.raises(CandidateCapExceeded):
+            detect_slides_freeze(
+                Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+                candidate_cap=3,
+            )
+    assert not list(tmp_path.glob("*.jpg"))
+
+
+def test_detect_slides_freeze_uses_camcorner_crop_when_no_explicit_crop(tmp_path):
+    with patch("scripts.slides._freeze_periods", return_value=[]), \
+         patch("scripts.slides.probe_dimensions", return_value=(1920, 1080)) as pd:
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, cam_corner="tr", caption="bottom",
+        )
+    pd.assert_called_once()  # falls back to dimension-based crop
+    assert out["slides"] == []
+
+
+def test_detect_slides_freeze_capture_is_mid_freeze_with_cap(tmp_path):
+    # dur known → start+min(dur/2,3); long freeze caps at +3; tail(None) → start+min(hold/2,3)
+    periods = [(10.0, 4.0), (20.0, 100.0), (30.0, None)]
+    captured = {}
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        captured["t"] = [round(s.t, 2) for s in scenes]
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            (out_dir / f"{i:04d}.jpg").write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": f"{i:04d}.jpg", "kind": "detected"})
+        return recs
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])):
+        detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0", hold=6.0)
+    assert captured["t"] == [12.0, 23.0, 33.0]
+
+
+def test_detect_slides_freeze_cleans_orphans_but_keeps_pre_existing(tmp_path):
+    # A frame from a prior run already on disk (direct caller, no pre-wipe).
+    (tmp_path / "0009_t99-99.jpg").write_bytes(b"old")
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        (out_dir / "0001_t00-10.jpg").write_bytes(b"x")
+        (out_dir / "0002_t00-20.jpg").write_bytes(b"x")
+        raise RuntimeError("ffmpeg boom on frame 3")
+
+    with patch("scripts.slides._freeze_periods",
+               return_value=[(10.0, 6.0), (20.0, 6.0), (30.0, 6.0)]), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract):
+        with pytest.raises(RuntimeError, match="boom"):
+            detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0")
+    # this run's partial frames removed; the pre-existing frame survives
+    assert {p.name for p in tmp_path.glob("*.jpg")} == {"0009_t99-99.jpg"}
+
+
+def test_freeze_periods_warns_on_orphan_duration(recwarn):
+    stderr = "freeze_duration: 4.0\nfreeze_start: 10.0\nfreeze_duration: 5.0\nfreeze_end: 15.0\n"
+    with patch("scripts.slides.subprocess.run", return_value=_freeze_proc(stderr)):
+        out = _freeze_periods(Path("v.mp4"), crop_vf="", hold=3, noise="-50dB")
+    assert out == [(10.0, 5.0)]
+    assert any("no preceding freeze_start" in str(w.message) for w in recwarn.list)
+
+
+def test_freeze_periods_warns_on_double_start(recwarn):
+    stderr = "freeze_start: 10.0\nfreeze_start: 20.0\nfreeze_duration: 5.0\nfreeze_end: 25.0\n"
+    with patch("scripts.slides.subprocess.run", return_value=_freeze_proc(stderr)):
+        out = _freeze_periods(Path("v.mp4"), crop_vf="", hold=3, noise="-50dB")
+    assert out == [(20.0, 5.0)]  # later start wins; earlier dropped (with warning)
+    assert any("had no" in str(w.message) for w in recwarn.list)

@@ -22,11 +22,15 @@ def extract_frames(
     out_dir: Path,
     width_px: int = 512,
     native: bool = False,
+    crop_vf: str = "",
 ) -> list[dict]:
     """For each scene, run a single-frame ffmpeg seek + extract.
 
     Returns: [{"index": int, "t": float, "path": str (relative to out_dir), "kind": str}]
     If native is true, no scale filter is applied.
+    `crop_vf` (e.g. "crop=W:H:X:Y,") is prepended to the filter chain when set, so
+    the written frame is cropped to the slide region. Default "" leaves the output
+    full-frame, byte-identical to the prior behavior.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
@@ -46,8 +50,15 @@ def extract_frames(
             "-i", str(video),
             "-frames:v", "1",
         ]
+        # Build the filter chain: optional crop, then optional scale. When neither
+        # applies (default native, no crop) no -vf is emitted — byte-identical output.
+        vf_parts: list[str] = []
+        if crop_vf:
+            vf_parts.append(crop_vf.rstrip(","))
         if not native:
-            cmd += ["-vf", f"scale={width_px}:-2"]
+            vf_parts.append(f"scale={width_px}:-2")
+        if vf_parts:
+            cmd += ["-vf", ",".join(vf_parts)]
         cmd += [
             "-q:v", "3",  # JPEG quality (2 best, 31 worst); 3 is a good balance
             str(out_path),

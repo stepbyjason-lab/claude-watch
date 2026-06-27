@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.watch import _scheme_ok, _validate_slides_args, _validate_slides_focus, _wipe_frames_dir
+from scripts.watch import (
+    _scheme_ok,
+    _validate_freeze_args,
+    _validate_slides_args,
+    _validate_slides_focus,
+    _wipe_frames_dir,
+)
 
 ROOT = Path(__file__).parent.parent
 FIXTURE = ROOT / "tests" / "fixtures" / "sample_10s.mp4"
@@ -41,6 +47,39 @@ def test_validate_slides_args_threshold_range():
     with pytest.raises(SystemExit):
         _validate_slides_args(scene_threshold=0.1, phash_dist=99)
     _validate_slides_args(scene_threshold=0.1, phash_dist=5)
+
+
+_FREEZE_OK = dict(detect="freeze", crop="100:100:0:0", freeze_noise="-50dB",
+                  hold=5.0, candidate_cap=800)
+
+
+def test_validate_freeze_args_accepts_good():
+    _validate_freeze_args(**_FREEZE_OK)
+    _validate_freeze_args(**{**_FREEZE_OK, "crop": None})  # crop optional
+
+
+@pytest.mark.parametrize("override", [
+    {"hold": 0}, {"hold": -1}, {"hold": float("nan")}, {"hold": float("inf")},
+    {"freeze_noise": "50dB"}, {"freeze_noise": "badval"},
+    {"crop": "1:2:3"}, {"crop": "0:100:0:0"},
+    {"candidate_cap": 0}, {"candidate_cap": -5},
+])
+def test_validate_freeze_args_rejects_bad(override):
+    with pytest.raises(SystemExit):
+        _validate_freeze_args(**{**_FREEZE_OK, **override})
+
+
+def test_validate_freeze_args_candidate_cap_checked_in_scene_mode():
+    # candidate_cap guard must fire regardless of detect mode (not just freeze)
+    with pytest.raises(SystemExit):
+        _validate_freeze_args(detect="scene", crop=None, freeze_noise="-50dB",
+                              hold=5.0, candidate_cap=0)
+
+
+def test_validate_freeze_args_skips_freeze_knobs_in_scene_mode():
+    # bad freeze-only knobs are ignored in scene mode (they don't apply)
+    _validate_freeze_args(detect="scene", crop=None, freeze_noise="anything",
+                          hold=0, candidate_cap=800)
 
 
 def test_wipe_frames_dir_refuses_paths_outside_library_root(tmp_path, monkeypatch):

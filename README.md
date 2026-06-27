@@ -59,9 +59,20 @@ for every mode — see [Note quality](#note-quality).
   hash, so it tells apart monochrome text slides on white decks): near-identical frames are dropped, but
   borderline pairs are **kept and flagged**, not silently merged.
 - Downloads 720p and extracts at native resolution; `--hi-res` for tiny-text decks.
-- New flags: `--slides`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`.
+- New flags: `--slides`, `--detect`, `--crop`, `--hold`, `--freeze-noise`, `--candidate-cap`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`.
 
-> **High-recall, not exhaustive.** Two real runs ([dogfood](docs/dogfood/2026-06-05-detailpage-slides.md), [white-deck validation](docs/dogfood/2026-06-05-harness-dhash-validation.md)) widened coverage well beyond manual sampling; the end-of-video anchor recovers the final slide, and on a 38-min white deck `--scene-threshold 0.15 --phash-dist 2` lifted capture from 25 → 31 slides. *Fast page-flips* and *near-identical build steps* can still merge, so keep the transcript as a parallel source and lower `--scene-threshold` / `--phash-dist` for dense text decks.
+> **Detection mode (default `--detect freeze`).** `--slides` now captures one frame per
+> *held* (frozen) screen — a prepared slide is shown static for a few seconds, while a live
+> demo (scrolling code/browser) never settles, so demo scroll-noise is skipped and the output
+> count tracks held screens rather than video length (no candidate-cap blowups on multi-hour
+> videos). For screen recordings where the cam/chat/taskbar isn't in a corner (e.g. Zoom),
+> pass an explicit `--crop W:H:X:Y` for the slide region — freeze needs the moving chrome out
+> of frame. `--hold N` (default 5s) is the min hold; lower = higher recall (also keeps held
+> demo screens), higher = stricter. Freeze does **not** separate slides from held demo screens
+> (that's a content judgment — leave it to the notes step); it removes the scroll-noise.
+> The previous scene-cut + coverage-floor detector is still available via `--detect scene`.
+
+> **High-recall, not exhaustive.** (`--detect scene`) Two real runs ([dogfood](docs/dogfood/2026-06-05-detailpage-slides.md), [white-deck validation](docs/dogfood/2026-06-05-harness-dhash-validation.md)) widened coverage well beyond manual sampling; the end-of-video anchor recovers the final slide, and on a 38-min white deck `--scene-threshold 0.15 --phash-dist 2` lifted capture from 25 → 31 slides. *Fast page-flips* and *near-identical build steps* can still merge, so keep the transcript as a parallel source and lower `--scene-threshold` / `--phash-dist` for dense text decks.
 
 **Supporting changes (additive / backward-compatible):**
 - `slug_for`: slides runs fold their full detection profile into the cache key, so changing any
@@ -90,7 +101,7 @@ Run the suite with `python -m pytest -m "not network"`.
 
 Flags: `--start/--end`, `--max-frames`, `--resolution`, `--scene-threshold`, `--max-gap`, `--whisper local|groq|openai`, `--no-whisper`, `--out-dir`.
 
-Slides flags: `--slides`, `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`.
+Slides flags: `--slides`, `--detect freeze|scene` (default freeze), `--crop W:H:X:Y`, `--hold SECONDS` (default 5), `--freeze-noise -50dB`, `--candidate-cap N` (default 800), `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`.
 
 ## Note quality
 

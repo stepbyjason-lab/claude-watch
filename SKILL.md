@@ -68,6 +68,11 @@ Optional flags:
 - `--no-whisper` — disable Whisper entirely
 - `--out-dir DIR` — override library root
 - `--slides` — **slide-deck mode**: high-recall capture of a prepared deck (see *Slides mode* below)
+- `--detect {freeze,scene}` — slides detection (default `freeze`): freeze captures one frame per held/static screen (skips demo scroll-noise, output ∝ held screens not duration); `scene` = legacy scene-cut + coverage floor
+- `--crop W:H:X:Y` — slides freeze: explicit slide-region crop (needed for Zoom-style recordings where the cam/chat/taskbar aren't in a corner; without it freeze can't see the slide as "frozen")
+- `--hold SECONDS` — slides freeze: min seconds a screen must hold to count (default 5; lower = more recall + some held demo, higher = stricter)
+- `--freeze-noise -50dB` — slides freeze: change tolerance (must be negative dB or 0..1 ratio)
+- `--candidate-cap N` — slides safety cap on candidate frames (default 800)
 - `--cam-corner {tr,tl,br,bl,none}` — presenter-cam corner to exclude (slides mode; default `tr`)
 - `--caption {bottom,top,none}` — burned-in caption band to exclude (slides mode; default `bottom`)
 - `--hi-res` — slides mode: download 1080p instead of 720p (tiny-text decks)
@@ -92,14 +97,21 @@ For lecture/seminar videos where the speaker presents slides, add `--slides`:
 python3 "${CLAUDE_SKILL_DIR}/scripts/watch.py" "<source>" --slides
 ```
 
-This **aims to capture every prepared slide** (page 1 → last — high recall, not a guarantee): downloads 720p, detects slide
-changes on the slide region (excluding the presenter cam + burned-in caption),
-deduplicates near-identical frames, and extracts at native 720p.
+This **aims to capture every prepared slide** (page 1 → last — high recall, not a guarantee).
+Default detection is `--detect freeze`: it captures one frame per *held* (static ≥ `--hold`s)
+screen, so demo scroll-noise is skipped and the count tracks held screens (not video length).
 
-- `--cam-corner {tr,tl,br,bl,none}` (default `tr`) — which corner the presenter cam occupies; `none` if there is no cam.
+- `--detect {freeze,scene}` (default `freeze`) — `freeze` = held-screen capture; `scene` = legacy scene-cut + coverage floor (use for fast-flip decks where slides show < `--hold`s).
+- `--crop W:H:X:Y` — explicit slide-region crop. **Needed for Zoom-style screen recordings** where the presenter cam / chat / taskbar aren't in a corner: freeze can't detect a "frozen" slide while that chrome keeps moving. Measure the slide rectangle from one extracted frame. Overrides `--cam-corner`/`--caption`.
+- `--hold N` (default 5) — min seconds a screen must hold. Lower → more recall (also keeps held demo screens); higher → stricter (may miss briefly-shown slides).
+- `--freeze-noise -50dB` (default) — freeze change tolerance; must be negative dB or a 0..1 ratio.
+- `--candidate-cap N` (default 800) — safety cap on candidate frames before extraction.
+- `--cam-corner {tr,tl,br,bl,none}` (default `tr`) — which corner the presenter cam occupies; `none` if there is no cam. (Used when `--crop` is not given.)
 - `--caption {bottom,top,none}` (default `bottom`) — burned-in caption band to ignore; `none` if there are no captions.
 - `--hi-res` — download 1080p (only for decks with very small text).
 - `--phash-dist N` (default 4) — dedup aggressiveness; lower keeps more near-duplicates.
+
+> **Freeze removes scroll-noise, not demo screens.** A held demo screen (terminal/IDE shown ≥ `--hold`s) is captured alongside real slides — separating "prepared slide" from "held app screen" is a content judgment for the notes step, not the extractor. For a demo-heavy seminar expect slides + some held demo frames (still far fewer than scene mode's per-interval noise).
 - **Dense white-text decks, reels, and fast page-flips:** if subtle text-only slides still merge, or slides flip every few seconds (reels / short-form), run `--scene-threshold 0.15 --phash-dist 2`. A lower detection floor surfaces faint *and* fast changes as candidates and the edge-hash dedup keeps the noise bounded — validated to lift a 38-min white deck from 25 → 31 slides, and to recover a 41-second reel from **3/7 → 7/7** captured cards, neither ballooning. (Do not raise this to the global default; it is a content-specific recommendation.)
 - `--slides` **cannot** be combined with `--start`/`--end` in v1 (the script errors out).
 

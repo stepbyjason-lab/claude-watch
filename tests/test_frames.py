@@ -34,6 +34,39 @@ def test_extract_frames_native_omits_scale_filter(tmp_path, monkeypatch):
     assert "-protocol_whitelist" in cmd
 
 
+def _capture_run(monkeypatch):
+    calls = []
+    def fake_run(cmd, *a, **k):
+        calls.append(cmd)
+    monkeypatch.setattr("scripts.frames.subprocess.run", fake_run)
+    return calls
+
+
+def _vf(cmd):
+    return cmd[cmd.index("-vf") + 1] if "-vf" in cmd else None
+
+
+def test_extract_frames_default_keeps_scale_only(tmp_path, monkeypatch):
+    calls = _capture_run(monkeypatch)
+    extract_frames(FIXTURE, [Scene(t=1.0, score=1.0, kind="detected")],
+                   out_dir=tmp_path, width_px=64)
+    assert _vf(calls[0]) == "scale=64:-2"  # byte-identical to prior behavior
+
+
+def test_extract_frames_crop_vf_prepends_crop_with_scale(tmp_path, monkeypatch):
+    calls = _capture_run(monkeypatch)
+    extract_frames(FIXTURE, [Scene(t=1.0, score=1.0, kind="detected")],
+                   out_dir=tmp_path, width_px=64, crop_vf="crop=10:10:0:0,")
+    assert _vf(calls[0]) == "crop=10:10:0:0,scale=64:-2"
+
+
+def test_extract_frames_crop_vf_native_crop_only(tmp_path, monkeypatch):
+    calls = _capture_run(monkeypatch)
+    extract_frames(FIXTURE, [Scene(t=1.0, score=1.0, kind="detected")],
+                   out_dir=tmp_path, native=True, crop_vf="crop=10:10:0:0,")
+    assert _vf(calls[0]) == "crop=10:10:0:0"
+
+
 @pytest.mark.integration
 def test_extract_frames_writes_one_jpeg_per_scene(tmp_path):
     scenes = [

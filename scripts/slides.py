@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import warnings
 from collections.abc import Callable
 from pathlib import Path
 
 from scripts import frames as frames_mod
-from scripts.scenes import apply_coverage_floor, detect_scenes
+from scripts.scenes import Scene, apply_coverage_floor, detect_scenes
 
 VALID_CAM = {"tr", "tl", "br", "bl", "none"}
 VALID_CAPTION = {"bottom", "top", "none"}
+
+# freeze-detect knob validation: an ffmpeg freezedetect noise value is either a
+# decibel form (e.g. "-50dB") or a 0..1 ratio (e.g. "0.003"). Anything else must be
+# rejected before it reaches the filtergraph string (injection guard).
+_FREEZE_NOISE_RX = re.compile(r"^-?\d+(?:\.\d+)?dB$|^(?:0(?:\.\d+)?|1(?:\.0+)?)$")
+_FREEZE_EVENT_RX = re.compile(r"freeze_(start|duration|end):\s*([0-9.]+)")
 
 
 class CandidateCapExceeded(RuntimeError):
@@ -280,5 +287,173 @@ def detect_slides(
             )
         else:
             Path(abs_path).unlink(missing_ok=True)
+
+    return {"slides": slides, "flagged": flagged}
+
+
+def parse_crop(spec: str) -> tuple[int, int, int, int]:
+    """Parse an explicit slide-region crop "W:H:X:Y" into validated ints.
+
+    Rejects non-integer / negative / zero-size specs so the value is safe to format
+    into an ffmpeg crop filter (no filtergraph injection from user input).
+    """
+    parts = spec.split(":")
+    if len(parts) != 4:
+        raise ValueError(f"--crop must be W:H:X:Y (4 ints), got {spec!r}")
+    try:
+        w, h, x, y = (int(p) for p in parts)
+    except ValueError:
+        raise ValueError(f"--crop fields must be integers, got {spec!r}") from None
+    if w <= 0 or h <= 0 or x < 0 or y < 0:
+        raise ValueError(f"--crop needs w>0,h>0,x>=0,y>=0, got {spec!r}")
+    return w, h, x, y
+
+
+def validate_freeze_noise(noise: str) -> str:
+    """Return `noise` if it is a valid freezedetect noise value, else raise.
+
+    A freeze *threshold* of >= 0 dB means "any difference counts as frozen", which
+    marks the whole video as one freeze — a silent mis-result. So dB values must be
+    strictly negative (e.g. -50dB); the 0..1 ratio form is also accepted.
+    """
+    if not _FREEZE_NOISE_RX.match(noise):
+        raise ValueError(
+            f"--freeze-noise must be a negative dB value (e.g. -50dB) or 0..1 ratio, got {noise!r}"
+        )
+    if noise.endswith("dB") and float(noise[:-2]) >= 0:
+        raise ValueError(
+            f"--freeze-noise dB must be negative (e.g. -50dB); {noise!r} would mark "
+            "the entire video as frozen"
+        )
+    return noise
+
+
+def _freeze_periods(
+    video: Path, *, crop_vf: str, hold: float, noise: str
+) -> list[tuple[float, float | None]]:
+    """Run ffmpeg freezedetect over the (optionally cropped) video.
+
+    Returns [(start_s, duration_s_or_None), ...] for each held period >= `hold`s.
+    A trailing period still frozen at EOF has duration None (no freeze_end emitted).
+    """
+    validate_freeze_noise(noise)
+    vf = f"{crop_vf}freezedetect=n={noise}:d={hold}"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostdin",
+        "-protocol_whitelist", "file",
+        "-i", str(video),
+        "-vf", vf,
+        "-map", "0:v:0",
+        "-f", "null", "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip()[-500:]
+        raise RuntimeError(f"freezedetect failed (exit {proc.returncode}): {detail}")
+
+    periods: list[tuple[float, float | None]] = []
+    pending: float | None = None
+    for kind, val in _FREEZE_EVENT_RX.findall(proc.stderr or ""):
+        v = float(val)
+        if kind == "start":
+            if pending is not None:
+                # Real ffmpeg always pairs start->duration; a second start without an
+                # intervening duration means malformed output — warn rather than
+                # silently drop the earlier period.
+                warnings.warn(
+                    f"freezedetect: freeze_start at {v}s while {pending}s had no "
+                    "duration; the earlier period is dropped",
+                    RuntimeWarning, stacklevel=2,
+                )
+            pending = v
+        elif kind == "duration":
+            if pending is None:
+                warnings.warn(
+                    f"freezedetect: freeze_duration {v}s with no preceding "
+                    "freeze_start; ignored",
+                    RuntimeWarning, stacklevel=2,
+                )
+                continue
+            periods.append((pending, v))
+            pending = None
+        # freeze_end carries no extra info (duration already paired); ignore.
+    if pending is not None:  # still frozen at EOF — keep the tail slide
+        periods.append((pending, None))
+    return periods
+
+
+def detect_slides_freeze(
+    video: Path,
+    *,
+    out_dir: Path,
+    cam_corner: str = "tr",
+    caption: str = "bottom",
+    crop: str | None = None,
+    hold: float = 5.0,
+    freeze_noise: str = "-50dB",
+    drop_dist: int = 4,
+    flag_dist: int = 10,
+    width_px: int = 1280,
+    candidate_cap: int = 800,
+) -> dict:
+    """Capture one frame per *held* (frozen) screen region, then dedup.
+
+    Unlike scene+floor (one candidate per cut + every max_gap seconds), this keys on
+    *stability*: a prepared slide is shown static for >= `hold`s, while a live demo
+    (scrolling code/browser) never settles -- so demo scroll-noise is skipped and the
+    candidate count tracks held screens, not video length. The output frames are
+    cropped (token savings); dedup therefore runs on the already-cropped frame.
+    """
+    if crop:
+        w, h, x, y = parse_crop(crop)
+        crop_vf = f"crop={w}:{h}:{x}:{y},"
+    else:
+        vw, vh = probe_dimensions(video)
+        crop_vf = build_crop_vf(vw, vh, cam_corner, caption)
+
+    periods = _freeze_periods(video, crop_vf=crop_vf, hold=hold, noise=freeze_noise)
+    if len(periods) > candidate_cap:
+        raise CandidateCapExceeded(
+            f"{len(periods)} freeze periods exceeds cap {candidate_cap}; "
+            "raise --hold, tighten --crop, or use --start/--end"
+        )
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Capture mid-freeze (safely inside the held period) so transitions aren't grabbed.
+    scenes = [
+        Scene(t=start + min((dur if dur is not None else hold) / 2, 3.0),
+              score=1.0, kind="detected")
+        for start, dur in periods
+    ]
+    frame_glob = "[0-9][0-9][0-9][0-9]_t*.jpg"  # frames.format_filename output
+    pre_existing = set(out_dir.glob(frame_glob))
+    try:
+        records = frames_mod.extract_frames(
+            video, scenes, out_dir=out_dir, width_px=width_px, native=True, crop_vf=crop_vf
+        )
+        absolute_records = [
+            {**rec, "path": str((out_dir / rec["path"]).resolve())} for rec in records
+        ]
+        # Frames are already cropped on disk, so dedup hashes them as-is (crop_vf="").
+        kept, flagged = phash_dedup(
+            absolute_records, crop_vf="", drop_dist=drop_dist, flag_dist=flag_dist
+        )
+    except Exception:
+        # A mid-run ffmpeg/dhash failure leaves partial JPEGs. Remove only the frames
+        # THIS run created (set-diff vs the pre-run snapshot) so a direct library caller
+        # that didn't pre-wipe doesn't lose a prior run's frames.
+        for leftover in set(out_dir.glob(frame_glob)) - pre_existing:
+            leftover.unlink(missing_ok=True)
+        raise
+    kept_paths = {rec["path"] for rec in kept}
+
+    slides = []
+    for rec, absolute_rec in zip(records, absolute_records):
+        if absolute_rec["path"] in kept_paths:
+            slides.append(
+                {"index": len(slides) + 1, "t": rec["t"], "path": rec["path"], "kind": "detected"}
+            )
+        else:
+            Path(absolute_rec["path"]).unlink(missing_ok=True)
 
     return {"slides": slides, "flagged": flagged}

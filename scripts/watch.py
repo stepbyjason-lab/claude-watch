@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
@@ -74,6 +75,28 @@ def _validate_slides_focus(*, slides: bool, focus) -> None:
         )
 
 
+def _validate_freeze_args(
+    *, detect: str, crop, freeze_noise: str, hold: float, candidate_cap: int
+) -> None:
+    """Fail fast on bad slides knobs before any download/extraction work.
+
+    candidate_cap applies to both detect modes; crop/freeze_noise/hold only to freeze.
+    """
+    try:
+        if candidate_cap <= 0:
+            raise ValueError("--candidate-cap must be > 0")
+        if detect == "freeze":
+            if crop:
+                slides_mod.parse_crop(crop)
+            slides_mod.validate_freeze_noise(freeze_noise)
+            # math.isfinite rejects nan/inf, which slip past a bare `<= 0` (nan
+            # comparisons are always False; inf > 0 is True).
+            if not math.isfinite(hold) or hold <= 0:
+                raise ValueError("--hold must be a finite number > 0")
+    except ValueError as e:
+        sys.exit(str(e))
+
+
 def _wipe_frames_dir(frames_dir: Path) -> None:
     # Containment guard: LIBRARY_ROOT is user-configurable (env var / .env /
     # --out-dir), so never delete outside the resolved library root.
@@ -104,18 +127,33 @@ def select_scenes(video, meta, args, focus, work, *, cached):
 
     if args.slides:
         _wipe_frames_dir(frames_dir)
-        result = slides_mod.detect_slides(
-            video,
-            out_dir=frames_dir,
-            cam_corner=args.cam_corner,
-            caption=args.caption,
-            threshold=args.scene_threshold,
-            max_gap=min(args.max_gap, 20.0),
-            drop_dist=args.phash_dist,
-            flag_dist=_slides_flag_dist(args.phash_dist),
-            width_px=1280,
-            candidate_cap=800,
-        )
+        if args.detect == "scene":
+            result = slides_mod.detect_slides(
+                video,
+                out_dir=frames_dir,
+                cam_corner=args.cam_corner,
+                caption=args.caption,
+                threshold=args.scene_threshold,
+                max_gap=min(args.max_gap, 20.0),
+                drop_dist=args.phash_dist,
+                flag_dist=_slides_flag_dist(args.phash_dist),
+                width_px=1280,
+                candidate_cap=args.candidate_cap,
+            )
+        else:  # freeze (default)
+            result = slides_mod.detect_slides_freeze(
+                video,
+                out_dir=frames_dir,
+                cam_corner=args.cam_corner,
+                caption=args.caption,
+                crop=args.crop,
+                hold=args.hold,
+                freeze_noise=args.freeze_noise,
+                drop_dist=args.phash_dist,
+                flag_dist=_slides_flag_dist(args.phash_dist),
+                width_px=1280,
+                candidate_cap=args.candidate_cap,
+            )
         frame_records = _prefix_frame_paths(result["slides"])
         scenes = [{"t": fr["t"], "score": 1.0, "kind": fr["kind"]} for fr in result["slides"]]
         return frame_records, scenes, result["flagged"]
@@ -195,6 +233,17 @@ def main(argv: list[str] | None = None) -> int:
                    help="slides mode: download 1080p instead of 720p")
     p.add_argument("--phash-dist", type=int, default=4,
                    help="slides dedup drop distance (<= this = duplicate)")
+    p.add_argument("--detect", choices=["freeze", "scene"], default="freeze",
+                   help="slides detection: freeze (held-screen capture, default) or "
+                        "scene (legacy scene-cut + coverage floor)")
+    p.add_argument("--crop", help="slides freeze: explicit slide-region crop W:H:X:Y "
+                   "(overrides --cam-corner/--caption; needed for non-corner cams/side chat)")
+    p.add_argument("--hold", type=float, default=5.0,
+                   help="slides freeze: min seconds a screen must hold to count as a slide")
+    p.add_argument("--freeze-noise", default="-50dB",
+                   help="slides freeze: pixel-change tolerance (ffmpeg freezedetect noise)")
+    p.add_argument("--candidate-cap", type=int, default=800,
+                   help="slides: safety cap on candidate frames before extraction")
     args = p.parse_args(argv)
 
     if not _scheme_ok(args.source):
@@ -203,6 +252,13 @@ def main(argv: list[str] | None = None) -> int:
     _validate_slides_focus(slides=args.slides, focus=focus)
     if args.slides:
         _validate_slides_args(scene_threshold=args.scene_threshold, phash_dist=args.phash_dist)
+        _validate_freeze_args(
+            detect=args.detect, crop=args.crop, freeze_noise=args.freeze_noise,
+            hold=args.hold, candidate_cap=args.candidate_cap,
+        )
+        if args.crop and args.detect == "scene":
+            print("warning: --crop is ignored with --detect scene "
+                  "(scene mode crops via --cam-corner/--caption)", file=sys.stderr)
 
     if args.out_dir:
         lib.LIBRARY_ROOT = Path(args.out_dir).expanduser().resolve()
@@ -215,12 +271,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.slides:
         meta["dl_resolution"] = "1080p" if args.hi_res else "720p"
         meta["slides_profile"] = "|".join([
+            args.detect,
             args.cam_corner,
             args.caption,
+            args.crop or "-",
+            f"{args.hold}",
+            args.freeze_noise,
             f"{args.scene_threshold}",
             f"{min(args.max_gap, 20.0)}",
             f"{args.phash_dist}",
             f"{_slides_flag_dist(args.phash_dist)}",
+            f"{args.candidate_cap}",
         ])
     else:
         meta["dl_resolution"] = "best"
@@ -300,9 +361,16 @@ def main(argv: list[str] | None = None) -> int:
         transcript_for_window = transcript
 
     # ---- Stage 4+5: detect + extract (mode-dispatched) ----
-    frame_records, scenes, flagged = select_scenes(
-        video, meta, args, focus, work, cached=cached
-    )
+    # The candidate-cap error carries an actionable message ("raise --hold ...") —
+    # surface it cleanly. Catch ONLY that specific type: a broad `except RuntimeError`
+    # would also swallow genuine ffmpeg/programming failures into a terse exit, hiding
+    # bugs. Real extraction failures keep their traceback (a loud signal, not silent).
+    try:
+        frame_records, scenes, flagged = select_scenes(
+            video, meta, args, focus, work, cached=cached
+        )
+    except slides_mod.CandidateCapExceeded as e:
+        sys.exit(str(e))
 
     # ---- Stage 7: emit manifest + meta + structured stdout block ----
     transcript_window_path = work / "transcript.window.json"
