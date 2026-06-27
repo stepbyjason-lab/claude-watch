@@ -29,7 +29,7 @@
    - `## Learning Path` — concepts/claims/frameworks explained, with inline screenshot evidence and captions
    - `## Frameworks…`, `## Examples and Applications`, `## Caveats and Open Questions`
    - `## Code & Commands` — code-on-screen transcribed into runnable blocks
-   - `## Slide Coverage Ledger` — every extracted slide/scene accounted for with `[t]` + frame links
+   - `## Slide Coverage Ledger` — every extracted frame accounted for as `inline` / `ledger` / `non-slide` (held demos and non-content stills get a one-line reason), with `[t]` + frame links
 5. Saves everything to the library at `<library-root>/<slug>/` — re-running the same URL is a cache hit.
    The library root defaults to the OS app-data dir (Windows `%LOCALAPPDATA%\claude-watch\library`,
    macOS `~/Library/Application Support/claude-watch/library`, Linux `$XDG_DATA_HOME` or

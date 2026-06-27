@@ -121,7 +121,7 @@ screen, so demo scroll-noise is skipped and the count tracks held screens (not v
 
 > **High-recall, not exhaustive.** The dedup uses an **edge (difference) hash** that tells monochrome / white-text slides apart far better than a plain average hash (which used to over-merge them on text decks). Slides mode also anchors the **final seconds of the video**, so a slide shown only at the very end (past the last coverage step, too late to register as a scene cut) is still extracted. It is still not a guarantee — *fast page-flips* (a slide shown for a second or two) and *near-identical build steps* can be skipped or merged. So: keep the **transcript as a parallel evidence source**, record any gaps honestly in the Slide Coverage Ledger, and for dense text decks lower `--scene-threshold` (e.g. 0.15) and/or `--phash-dist` (e.g. 2) if similar slides still merge. Field evidence: [`docs/dogfood/2026-06-05-detailpage-slides.md`](docs/dogfood/2026-06-05-detailpage-slides.md), [`docs/dogfood/2026-06-05-harness-dhash-validation.md`](docs/dogfood/2026-06-05-harness-dhash-validation.md).
 
-**Reading slides-mode output:** read every extracted slide, preserve every unique prepared slide that was extracted, but do **not** make "one slide = one section" the default note structure. Frames are ordered by timestamp = deck order, and `slides_extracted: N` tells you how many distinct slides were captured. Use the slides as evidence, then group adjacent slides into the concepts, claims, frameworks, examples, or caveats they support.
+**Reading slides-mode output:** read every extracted frame and classify/cover it per the contract below (most prepared slides embedded `inline`), but do **not** make "one slide = one section" the default note structure. Frames are ordered by timestamp = deck order, and `slides_extracted: N` is the **raw count of extracted frames** — prepared slides plus held demo screens and the occasional non-content still (high recall, not a pre-filtered slide count). Use the slides as evidence, then group adjacent slides into the concepts, claims, frameworks, examples, or caveats they support.
 
 Completeness and structure are separate: `--slides` protects coverage; concept-first writing protects learning quality. Do not drop prepared slides just to avoid a chronological-looking note. Instead, move each slide under the concept it supports and use an evidence caption that explains what the slide proves or exemplifies.
 
@@ -131,7 +131,17 @@ The stdout may print `review: near-dup t=A ~ t=B (dist D)` lines. These are bord
 
 The default output is **not** a scene-by-scene screen log. Read every frame and transcript segment, then reorganize the video into a study document. The prose should teach the core thesis and concepts; screenshots should appear inline where they prove, illustrate, or clarify the idea.
 
-For slide lectures, account for every unique prepared slide captured by `--slides`. Group slides by concept; do not drop slides just to make the note less chronological. Avoid duplicate embeds: if a slide is embedded inline, the coverage ledger can reference it without embedding it again.
+For slide lectures, every frame `--slides` extracts must be accounted for and most prepared slides embedded — grouped by concept rather than by timestamp, never dropped just to make the note look less chronological, and never embedded twice. The rules below make this precise.
+
+`--slides` output mixes three kinds of frame, and the note must classify — not silently drop — each one:
+
+- **Prepared slide** — a deck page. **Default to embedding it `inline`** beside the concept it supports. Use `ledger` (reference-only, no image) only when an inline image adds nothing a nearby embedded slide and the prose don't already show — e.g. a near-duplicate build step, or the third near-identical slide of one concept. The test is "would the reader lose information without this image?" — if yes, `inline`.
+- **Held demo / app screen** — an IDE, terminal, browser, or doc held ≥ `--hold`s, captured alongside slides (see the "Freeze removes scroll-noise, not demo screens" note above). Embed **one representative** `inline` where it concretely supports a concept; record the other near-identical frames of that same cluster as `non-slide` pointing at the representative's timestamp. **A doc / browser / Notion screen the speaker teaches *from* is content — treat it as a prepared slide (embed or `ledger`), not a demo.**
+- **Non-content still** — a venue/room shot, a break screen, or a blurry transition the freeze detector happened to catch. Record it once as `non-slide` with a one-line reason; never embed it.
+
+The three ledger statuses are **dispositions, not frame kinds**: `inline` = embedded (a prepared slide, or the one representative of a demo cluster); `ledger` = a prepared slide that is covered but not embedded; `non-slide` = an extracted frame that is not a prepared slide and is not embedded (its row carries a one-line reason). `non-slide` is not a fourth kind.
+
+Account for **every extracted frame** so the count is auditable (`extracted = inline + ledger + non-slide`) — but **accounting is not coverage**. Most prepared slides should be `inline`; `ledger` is for genuine near-duplicates; `non-slide` is a narrow exception, **not a dumping ground**. If `non-slide` holds the bulk of the frames you have under-embedded — re-check which "demos" are actually taught-from content. When unsure whether a frame is a slide or a demo, treat it as a prepared slide. Never silently drop an extracted frame, and never pad the note with redundant demo or venue frames.
 
 ````markdown
 # <Video Title>
@@ -191,13 +201,16 @@ def forward(x):
 
 ## Slide Coverage Ledger
 
-<Recommended for slide lectures and dense demos. Use this to prove coverage and traceability, not as the main narrative. If using `--slides`, every unique prepared slide should be accounted for exactly once as either `inline` or `ledger`. For long decks, prefer reference-only ledger rows instead of embedding every image.>
+<Recommended for slide lectures and dense demos. Use this to prove coverage and traceability, not as the main narrative. If using `--slides`, every **extracted** frame is accounted for exactly once: a prepared slide as `inline` (the default) or `ledger` (a genuine near-duplicate), and a held demo or non-content still as `non-slide` (with a one-line reason). The extracted count therefore equals `inline + ledger + non-slide`, so coverage is auditable and nothing is silently dropped. Statuses are dispositions, not frame kinds — most prepared slides should be `inline`; do not push slides into `ledger`/`non-slide` to shrink the note. In the last column, `inline`/`ledger` rows name the concept the slide supports; `non-slide` rows hold the one-line reason.>
 
-| Time | Frame | Status | Supports |
+| Time | Frame | Status | Supports / Reason |
 |---|---|---|---|
-| `[t=00:04]` | `frames/0001_t00-04.jpg` | inline | <concept/claim this embedded frame supports> |
-| `[t=00:31]` | `frames/0002_t00-31.jpg` | ledger | <concept/claim this non-embedded slide supports> |
-| `[t=01:12]` | `frames/0003_t01-12.jpg` | ledger | <every slide referenced above (e.g. in "Additional supporting slides") must also appear here> |
+| `[t=00:04]` | `frames/0001_t00-04.jpg` | inline | <concept/claim this embedded slide supports> |
+| `[t=00:18]` | `frames/0002_t00-18.jpg` | inline | <concept/claim this embedded slide supports> |
+| `[t=00:31]` | `frames/0003_t00-31.jpg` | ledger | near-duplicate build step of the `[t=00:18]` slide; covered, not re-embedded |
+| `[t=20:55]` | `frames/0041_t20-55.jpg` | inline | held IDE demo, representative of the `[t=20:55]`–`[t=21:30]` cluster |
+| `[t=21:30]` | `frames/0044_t21-30.jpg` | non-slide | held IDE demo; near-identical to representative `[t=20:55]` |
+| `[t=75:12]` | `frames/0079_t75-12.jpg` | non-slide | venue/room shot caught by freeze; non-content |
 
 ### Optional Embedded Ledger Detail
 
@@ -224,7 +237,7 @@ Before finalizing, check the draft against this gate:
 - If evidence captions or visual descriptions are longer than the teaching prose across most of the document, rewrite the note.
 - If slide titles became section titles without interpretation, rewrite the section titles as claims or lessons.
 - If a section title is only a timestamp or a copied slide title, rewrite it as a concept, claim, workflow, or decision rule.
-- If using `--slides`, verify every unique prepared slide is accounted for exactly once in the Slide Coverage Ledger as either `inline` or `ledger`. Do not reduce slide coverage to avoid a scene-log shape, and do not duplicate image embeds for the same slide.
+- If using `--slides`, record the `slides_extracted: N` value from the script's stdout and verify the Slide Coverage Ledger has exactly N rows — each extracted frame accounted for once, a prepared slide as `inline` (the default) or `ledger`, a held demo or non-content still as `non-slide` with a reason — so `N = inline + ledger + non-slide`. **Coverage check: most prepared slides must be `inline`; if `non-slide` holds the majority of frames, re-check for taught-from content mislabeled as a demo and re-embed it** (accounting every frame is not the same as covering the deck). Every timestamp a `non-slide` row names as its representative must itself appear as an `inline` row. Do not reduce slide coverage to avoid a scene-log shape, do not silently omit or `non-slide`-dump extracted frames, and do not pad the note with redundant demo/venue frames or duplicate embeds for the same slide.
 - Every major claim has at least one timestamp or frame reference.
 - Code, diagrams, UI states, and slide text are transcribed only when they materially support the learning goal.
 
