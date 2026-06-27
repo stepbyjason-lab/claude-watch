@@ -73,6 +73,8 @@ Optional flags:
 - `--hold SECONDS` — slides freeze: min seconds a screen must hold to count (default 5; lower = more recall + some held demo, higher = stricter)
 - `--freeze-noise -50dB` — slides freeze: change tolerance (must be negative dB or 0..1 ratio)
 - `--candidate-cap N` — slides safety cap on candidate frames (default 800)
+- `--prefer-light` — slides freeze (opt-in): drop dark frames (IDE/terminal demos) by mean brightness; assumes light-background slides — leave off for dark-themed decks
+- `--light-threshold N` — mean-grayscale cutoff 0–255 for `--prefer-light` (default 80)
 - `--cam-corner {tr,tl,br,bl,none}` — presenter-cam corner to exclude (slides mode; default `tr`)
 - `--caption {bottom,top,none}` — burned-in caption band to exclude (slides mode; default `bottom`)
 - `--hi-res` — slides mode: download 1080p instead of 720p (tiny-text decks)
@@ -106,6 +108,8 @@ screen, so demo scroll-noise is skipped and the count tracks held screens (not v
 - `--hold N` (default 5) — min seconds a screen must hold. Lower → more recall (also keeps held demo screens); higher → stricter (may miss briefly-shown slides).
 - `--freeze-noise -50dB` (default) — freeze change tolerance; must be negative dB or a 0..1 ratio.
 - `--candidate-cap N` (default 800) — safety cap on candidate frames before extraction.
+- `--prefer-light` (opt-in) — after capture, drop frames whose mean brightness < `--light-threshold` to discard dark IDE/terminal **demo** screens. Assumes light-background slides; **leave off for dark-themed decks**. Removes dark demos only (light-background demos still pass — final selection is the notes step's job).
+- `--light-threshold N` (default 80) — mean grayscale 0–255 cutoff for `--prefer-light`.
 - `--cam-corner {tr,tl,br,bl,none}` (default `tr`) — which corner the presenter cam occupies; `none` if there is no cam. (Used when `--crop` is not given.)
 - `--caption {bottom,top,none}` (default `bottom`) — burned-in caption band to ignore; `none` if there are no captions.
 - `--hi-res` — download 1080p (only for decks with very small text).

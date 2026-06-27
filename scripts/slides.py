@@ -382,6 +382,27 @@ def _freeze_periods(
     return periods
 
 
+def mean_luma(image_path: str | Path) -> int:
+    """Mean grayscale (0-255) of an image via ffmpeg.
+
+    Used to tell light-background prepared slides from dark IDE/terminal demo
+    screens. Operates on the file as-is — freeze output is already cropped to the
+    slide region, so no crop is applied here. Internal helper: callers pass a path
+    they control (here always under out_dir); it is not a path-validation boundary.
+    """
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-protocol_whitelist", "file",
+        "-i", str(image_path),
+        "-vf", "format=gray,scale=1:1",
+        "-frames:v", "1", "-f", "rawvideo", "-",
+    ]
+    raw = subprocess.run(cmd, capture_output=True, check=True).stdout
+    if len(raw) != 1:
+        raise RuntimeError(f"mean_luma expected 1 gray byte, got {len(raw)} for {image_path}")
+    return raw[0]
+
+
 def detect_slides_freeze(
     video: Path,
     *,
@@ -395,6 +416,8 @@ def detect_slides_freeze(
     flag_dist: int = 10,
     width_px: int = 1280,
     candidate_cap: int = 800,
+    prefer_light: bool = False,
+    light_threshold: float = 80.0,
 ) -> dict:
     """Capture one frame per *held* (frozen) screen region, then dedup.
 
@@ -403,6 +426,10 @@ def detect_slides_freeze(
     (scrolling code/browser) never settles -- so demo scroll-noise is skipped and the
     candidate count tracks held screens, not video length. The output frames are
     cropped (token savings); dedup therefore runs on the already-cropped frame.
+
+    With `prefer_light`, frames whose mean brightness is below `light_threshold`
+    (0-255) are dropped after dedup — a cheap heuristic that removes dark IDE/terminal
+    demo screens. Assumes light-background slides; leave off for dark-themed decks.
     """
     if crop:
         w, h, x, y = parse_crop(crop)
@@ -455,5 +482,34 @@ def detect_slides_freeze(
             )
         else:
             Path(absolute_rec["path"]).unlink(missing_ok=True)
+
+    if prefer_light:
+        bright = []
+        for s in slides:
+            # s["path"] is relative; rebuild the abs path the same way the entries
+            # above were created (out_dir is unchanged within this call).
+            abs_path = (out_dir / s["path"]).resolve()
+            try:
+                luma = mean_luma(abs_path)
+            except (subprocess.CalledProcessError, RuntimeError, OSError) as exc:
+                # Can't measure brightness → KEEP the frame (fail-open for an opt-in
+                # filter), don't crash mid-loop leaving frames half-deleted.
+                warnings.warn(
+                    f"mean_luma failed for {abs_path} ({exc}); keeping frame",
+                    RuntimeWarning, stacklevel=2,
+                )
+                bright.append({**s, "index": len(bright) + 1})
+                continue
+            if luma >= light_threshold:
+                bright.append({**s, "index": len(bright) + 1})
+            else:
+                abs_path.unlink(missing_ok=True)
+        if slides and not bright:
+            warnings.warn(
+                f"--prefer-light dropped all {len(slides)} slides at threshold "
+                f"{light_threshold}; lower --light-threshold (dark-themed deck?)",
+                RuntimeWarning, stacklevel=2,
+            )
+        slides = bright
 
     return {"slides": slides, "flagged": flagged}

@@ -101,7 +101,9 @@ Run the suite with `python -m pytest -m "not network"`.
 
 Flags: `--start/--end`, `--max-frames`, `--resolution`, `--scene-threshold`, `--max-gap`, `--whisper local|groq|openai`, `--no-whisper`, `--out-dir`.
 
-Slides flags: `--slides`, `--detect freeze|scene` (default freeze), `--crop W:H:X:Y`, `--hold SECONDS` (default 5), `--freeze-noise -50dB`, `--candidate-cap N` (default 800), `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`.
+Slides flags: `--slides`, `--detect freeze|scene` (default freeze), `--crop W:H:X:Y`, `--hold SECONDS` (default 5), `--freeze-noise -50dB`, `--candidate-cap N` (default 800), `--prefer-light` + `--light-threshold N` (default 80), `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`.
+
+> **`--prefer-light` (opt-in, freeze only).** After freeze capture, drops frames whose mean brightness is below `--light-threshold` (0–255, default 80) — a cheap way to discard dark IDE/terminal *demo* screens and cut downstream token cost further. Assumes light-background slides: **leave it off for dark-themed decks** (their slides would be dropped). It removes dark demos, not light-background ones — final slide selection still belongs to the notes step.
 
 ## Note quality
 

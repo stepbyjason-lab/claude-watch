@@ -76,11 +76,13 @@ def _validate_slides_focus(*, slides: bool, focus) -> None:
 
 
 def _validate_freeze_args(
-    *, detect: str, crop, freeze_noise: str, hold: float, candidate_cap: int
+    *, detect: str, crop, freeze_noise: str, hold: float, candidate_cap: int,
+    light_threshold: float = 80.0,
 ) -> None:
     """Fail fast on bad slides knobs before any download/extraction work.
 
-    candidate_cap applies to both detect modes; crop/freeze_noise/hold only to freeze.
+    candidate_cap applies to both detect modes; crop/freeze_noise/hold/light_threshold
+    only to freeze.
     """
     try:
         if candidate_cap <= 0:
@@ -93,8 +95,26 @@ def _validate_freeze_args(
             # comparisons are always False; inf > 0 is True).
             if not math.isfinite(hold) or hold <= 0:
                 raise ValueError("--hold must be a finite number > 0")
+            if not math.isfinite(light_threshold) or not (0 <= light_threshold <= 255):
+                raise ValueError("--light-threshold must be in [0, 255]")
     except ValueError as e:
         sys.exit(str(e))
+
+
+def _slides_advisories(args) -> list[str]:
+    """Non-fatal advisories for flag combinations that are silently inert.
+
+    Returned as strings (not printed) so they're unit-testable; main() prints them.
+    """
+    msgs: list[str] = []
+    if args.detect == "scene":
+        if args.crop:
+            msgs.append("--crop is ignored with --detect scene "
+                        "(scene mode crops via --cam-corner/--caption)")
+        if args.prefer_light:
+            msgs.append("--prefer-light is ignored with --detect scene "
+                        "(brightness filtering applies to freeze mode only)")
+    return msgs
 
 
 def _wipe_frames_dir(frames_dir: Path) -> None:
@@ -153,6 +173,8 @@ def select_scenes(video, meta, args, focus, work, *, cached):
                 flag_dist=_slides_flag_dist(args.phash_dist),
                 width_px=1280,
                 candidate_cap=args.candidate_cap,
+                prefer_light=args.prefer_light,
+                light_threshold=args.light_threshold,
             )
         frame_records = _prefix_frame_paths(result["slides"])
         scenes = [{"t": fr["t"], "score": 1.0, "kind": fr["kind"]} for fr in result["slides"]]
@@ -244,6 +266,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="slides freeze: pixel-change tolerance (ffmpeg freezedetect noise)")
     p.add_argument("--candidate-cap", type=int, default=800,
                    help="slides: safety cap on candidate frames before extraction")
+    p.add_argument("--prefer-light", action="store_true",
+                   help="slides freeze: drop dark (demo/terminal) frames by mean brightness "
+                        "(opt-in; assumes light-background slides — leave off for dark decks)")
+    p.add_argument("--light-threshold", type=float, default=80.0,
+                   help="slides freeze: mean-grayscale cutoff 0-255 for --prefer-light (default 80)")
     args = p.parse_args(argv)
 
     if not _scheme_ok(args.source):
@@ -255,10 +282,10 @@ def main(argv: list[str] | None = None) -> int:
         _validate_freeze_args(
             detect=args.detect, crop=args.crop, freeze_noise=args.freeze_noise,
             hold=args.hold, candidate_cap=args.candidate_cap,
+            light_threshold=args.light_threshold,
         )
-        if args.crop and args.detect == "scene":
-            print("warning: --crop is ignored with --detect scene "
-                  "(scene mode crops via --cam-corner/--caption)", file=sys.stderr)
+        for msg in _slides_advisories(args):
+            print(f"warning: {msg}", file=sys.stderr)
 
     if args.out_dir:
         lib.LIBRARY_ROOT = Path(args.out_dir).expanduser().resolve()
@@ -282,6 +309,10 @@ def main(argv: list[str] | None = None) -> int:
             f"{args.phash_dist}",
             f"{_slides_flag_dist(args.phash_dist)}",
             f"{args.candidate_cap}",
+            f"{int(args.prefer_light)}",
+            # threshold only affects output when prefer_light is on — keep it out of
+            # the cache key otherwise so tweaking it alone doesn't force re-extraction.
+            f"{args.light_threshold}" if args.prefer_light else "-",
         ])
     else:
         meta["dl_resolution"] = "best"

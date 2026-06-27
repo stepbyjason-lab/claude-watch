@@ -10,6 +10,7 @@ from scripts.slides import (
     detect_slides_freeze,
     dhash,
     hamming,
+    mean_luma,
     parse_crop,
     phash_dedup,
     probe_dimensions,
@@ -423,3 +424,105 @@ def test_freeze_periods_warns_on_double_start(recwarn):
         out = _freeze_periods(Path("v.mp4"), crop_vf="", hold=3, noise="-50dB")
     assert out == [(20.0, 5.0)]  # later start wins; earlier dropped (with warning)
     assert any("had no" in str(w.message) for w in recwarn.list)
+
+
+# ---- prefer-light brightness filter (R02) ----
+
+def _freeze_3(tmp_path, luma_by_name):
+    """Run detect_slides_freeze with 3 held periods, fake extract + keep-all dedup,
+    and mean_luma mapped by filename. Returns the result dict."""
+    periods = [(10.0, 6.0), (20.0, 6.0), (30.0, 6.0)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}_t00-{i:02d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": "detected"})
+        return recs
+
+    return periods, fake_extract
+
+
+def test_detect_slides_freeze_prefer_light_drops_dark(tmp_path):
+    periods, fake_extract = _freeze_3(tmp_path, None)
+    luma = {"0001_t00-01.jpg": 200, "0002_t00-02.jpg": 30, "0003_t00-03.jpg": 150}
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
+         patch("scripts.slides.mean_luma", side_effect=lambda p: luma[Path(p).name]):
+        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+                                   prefer_light=True, light_threshold=80.0)
+    names = [Path(s["path"]).name for s in out["slides"]]
+    assert names == ["0001_t00-01.jpg", "0003_t00-03.jpg"]  # dark (30) dropped
+    assert [s["index"] for s in out["slides"]] == [1, 2]     # reindexed 1-based
+    assert {p.name for p in tmp_path.glob("*.jpg")} == set(names)  # dark file unlinked
+
+
+def test_detect_slides_freeze_prefer_light_off_keeps_all_and_skips_luma(tmp_path):
+    periods, fake_extract = _freeze_3(tmp_path, None)
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
+         patch("scripts.slides.mean_luma", side_effect=AssertionError("must not be called")):
+        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+                                   prefer_light=False)
+    assert len(out["slides"]) == 3  # off → no brightness filtering, mean_luma not called
+
+
+def test_detect_slides_freeze_prefer_light_all_dropped_warns(tmp_path, recwarn):
+    periods, fake_extract = _freeze_3(tmp_path, None)
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
+         patch("scripts.slides.mean_luma", side_effect=lambda p: 10):  # all dark
+        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+                                   prefer_light=True, light_threshold=80.0)
+    assert out["slides"] == []
+    assert not list(tmp_path.glob("*.jpg"))  # all dropped files unlinked
+    assert any("dropped all" in str(w.message) for w in recwarn.list)
+
+
+def test_detect_slides_freeze_prefer_light_keeps_exactly_at_threshold(tmp_path):
+    periods, fake_extract = _freeze_3(tmp_path, None)
+    luma = {"0001_t00-01.jpg": 80, "0002_t00-02.jpg": 79, "0003_t00-03.jpg": 81}
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
+         patch("scripts.slides.mean_luma", side_effect=lambda p: luma[Path(p).name]):
+        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+                                   prefer_light=True, light_threshold=80.0)
+    # >= is inclusive: luma 80 == threshold is kept; 79 dropped
+    assert [Path(s["path"]).name for s in out["slides"]] == ["0001_t00-01.jpg", "0003_t00-03.jpg"]
+
+
+def test_detect_slides_freeze_prefer_light_failopen_on_luma_error(tmp_path, recwarn):
+    import subprocess as _sp
+    periods, fake_extract = _freeze_3(tmp_path, None)
+
+    def luma(p):
+        if Path(p).name == "0002_t00-02.jpg":
+            raise _sp.CalledProcessError(1, "ffmpeg")  # measurement failure on one frame
+        return 200
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
+         patch("scripts.slides.mean_luma", side_effect=luma):
+        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+                                   prefer_light=True, light_threshold=80.0)
+    names = [Path(s["path"]).name for s in out["slides"]]
+    assert names == ["0001_t00-01.jpg", "0002_t00-02.jpg", "0003_t00-03.jpg"]  # failed frame kept
+    assert [s["index"] for s in out["slides"]] == [1, 2, 3]
+    assert any("mean_luma failed" in str(w.message) for w in recwarn.list)
+
+
+@pytest.mark.integration
+def test_mean_luma_white_vs_black(tmp_path):
+    import subprocess
+    white, black = tmp_path / "w.jpg", tmp_path / "b.jpg"
+    for color, p in [("white", white), ("black", black)]:
+        subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                        "-i", f"color={color}:size=32x32", "-frames:v", "1", str(p)], check=True)
+    assert mean_luma(white) >= 240
+    assert mean_luma(black) <= 16

@@ -1,3 +1,4 @@
+import argparse
 import json
 import subprocess
 import sys
@@ -7,6 +8,7 @@ import pytest
 
 from scripts.watch import (
     _scheme_ok,
+    _slides_advisories,
     _validate_freeze_args,
     _validate_slides_args,
     _validate_slides_focus,
@@ -63,10 +65,36 @@ def test_validate_freeze_args_accepts_good():
     {"freeze_noise": "50dB"}, {"freeze_noise": "badval"},
     {"crop": "1:2:3"}, {"crop": "0:100:0:0"},
     {"candidate_cap": 0}, {"candidate_cap": -5},
+    {"light_threshold": -1}, {"light_threshold": 256}, {"light_threshold": float("nan")},
 ])
 def test_validate_freeze_args_rejects_bad(override):
     with pytest.raises(SystemExit):
         _validate_freeze_args(**{**_FREEZE_OK, **override})
+
+
+def test_validate_freeze_args_accepts_light_threshold_bounds():
+    _validate_freeze_args(**{**_FREEZE_OK, "light_threshold": 0})    # inclusive lower
+    _validate_freeze_args(**{**_FREEZE_OK, "light_threshold": 255})  # inclusive upper
+
+
+def _adv_args(**kw):
+    base = dict(detect="freeze", crop=None, prefer_light=False)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_slides_advisories_freeze_is_silent():
+    assert _slides_advisories(_adv_args(detect="freeze", crop="1:1:0:0", prefer_light=True)) == []
+
+
+def test_slides_advisories_warns_crop_in_scene_mode():
+    msgs = _slides_advisories(_adv_args(detect="scene", crop="1:1:0:0"))
+    assert any("--crop" in m for m in msgs)
+
+
+def test_slides_advisories_warns_prefer_light_in_scene_mode():
+    msgs = _slides_advisories(_adv_args(detect="scene", prefer_light=True))
+    assert any("--prefer-light" in m for m in msgs)
 
 
 def test_validate_freeze_args_candidate_cap_checked_in_scene_mode():
