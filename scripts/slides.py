@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tempfile
 import warnings
 from collections.abc import Callable
 from pathlib import Path
@@ -309,6 +310,182 @@ def parse_crop(spec: str) -> tuple[int, int, int, int]:
     return w, h, x, y
 
 
+def _read_pgm(path: Path) -> tuple[int, int, bytes]:
+    """Parse a binary PGM (P5) as ffmpeg writes it: ``P5\\nW H\\nMAX\\n<raw bytes>``.
+
+    ffmpeg emits no comments, so a minimal whitespace-tokenized header parse suffices.
+    Raises ValueError on a malformed or short-read file.
+    """
+    raw = path.read_bytes()
+    if raw[:2] != b"P5":
+        raise ValueError(f"not a binary PGM (P5): {path}")
+    idx = 2
+    header: list[int] = []  # width, height, maxval
+    while len(header) < 3:
+        while idx < len(raw) and raw[idx] in b" \t\n\r":
+            idx += 1
+        start = idx
+        while idx < len(raw) and raw[idx] not in b" \t\n\r":
+            idx += 1
+        if start == idx:
+            raise ValueError(f"truncated PGM header: {path}")
+        header.append(int(raw[start:idx]))
+    idx += 1  # exactly one whitespace byte separates the header from the raster
+    # (ffmpeg always emits a single \n here; the raster's first byte may itself be a
+    # whitespace *value*, so this must stay a fixed +1, not a whitespace-skip loop).
+    w, h, _maxval = header
+    if not (1 <= w <= 8192 and 1 <= h <= 8192):  # bound a crafted header before slicing
+        raise ValueError(f"PGM dimensions out of bounds ({w}x{h}): {path}")
+    pixels = raw[idx : idx + w * h]
+    if len(pixels) != w * h:
+        raise ValueError(f"PGM pixel short read ({len(pixels)} != {w * h}): {path}")
+    return w, h, pixels
+
+
+def _trim_high_motion_edges(
+    motion: list[int], pw: int, ph: int, *, hot_quantile: float = 0.85, band: float = 0.12
+) -> tuple[int, int, int, int] | None:
+    """Trim persistently high-motion edge bands; return (x0, x1, y0, y1) or None.
+
+    `motion` is a per-pixel summed abs-diff map (row-major, length pw*ph). Pixels above
+    the `hot_quantile` percentile are "hot" (cam / chat / toolbar motion); rows and
+    columns whose hot-pixel ratio exceeds `band` are peeled inward from each edge. The
+    remaining centre rectangle is the static slide region. When motion is sparse (a cam
+    smaller than the quantile tail) the percentile is 0, so any motion at all counts as
+    hot. A fully static capture (no motion) yields the full-frame box; the caller treats
+    that as "no crop benefit". Returns None only if the region collapses.
+    """
+    n = pw * ph
+    if n == 0:
+        return None
+    ordered = sorted(motion)
+    hot_cut = ordered[min(int(n * hot_quantile), n - 1)]
+    if hot_cut > 0:
+        # `>=` so the quantile-pivot value itself (the cam's quietest pixels) is hot.
+        hot = [1 if m >= hot_cut else 0 for m in motion]
+    else:
+        # Sparse cam (smaller than the tail) or fully static: the percentile is 0, so
+        # key on any real motion. A fully static map -> no hot pixels -> full-frame box,
+        # which the caller rejects as "no crop benefit".
+        hot = [1 if m > 0 else 0 for m in motion]
+    row_ratio = [sum(hot[y * pw : y * pw + pw]) / pw for y in range(ph)]
+    col_ratio = [sum(hot[y * pw + x] for y in range(ph)) / ph for x in range(pw)]
+
+    y0 = 0
+    while y0 < ph and row_ratio[y0] > band:
+        y0 += 1
+    y1 = ph
+    while y1 > y0 and row_ratio[y1 - 1] > band:
+        y1 -= 1
+    x0 = 0
+    while x0 < pw and col_ratio[x0] > band:
+        x0 += 1
+    x1 = pw
+    while x1 > x0 and col_ratio[x1 - 1] > band:
+        x1 -= 1
+    if x1 - x0 <= 0 or y1 - y0 <= 0:
+        return None
+    return x0, x1, y0, y1
+
+
+def detect_slide_crop(
+    video: Path, vw: int, vh: int, *, samples: int = 24, probe_w: int = 320
+) -> str | None:
+    """Auto-detect the static slide region as a ``"W:H:X:Y"`` crop string, or None.
+
+    Heuristic (zero-dependency: ffmpeg + stdlib). Sample `samples` grayscale frames,
+    build a per-pixel temporal motion map (summed frame-to-frame abs-diff), then trim
+    edge bands that are persistently high-motion -- a presenter cam, side chat, or a
+    toolbar. The remaining centre rectangle is the slide region, scaled back to source
+    resolution and even-aligned for a yuv420 crop.
+
+    Returns None (the caller falls back to --cam-corner/--caption) when detection is
+    unreliable: a missing duration, fewer than 3 sampled frames, any ffmpeg/PGM failure,
+    a fully static capture, or a trimmed region whose area is under 40% or over 92% of the
+    frame (negligible crop benefit -- e.g. a uniform-motion demo where edge-trim does
+    almost nothing). A genuine failure (ffmpeg error, PGM parse) is warned before the
+    None so the fallback isn't silent. Best-effort by design -- explicit --crop stays the
+    precise option.
+    """
+    try:
+        duration = _probe_duration(video)
+    except (RuntimeError, subprocess.CalledProcessError, OSError, ValueError) as exc:
+        warnings.warn(
+            f"--crop auto: could not probe duration ({exc}); skipping auto-detect",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+    if duration <= 0 or samples < 3 or vw <= 0 or vh <= 0:
+        return None
+    interval = max(duration / samples, 0.5)
+
+    with tempfile.TemporaryDirectory(prefix="cw-autocrop-") as td:
+        pattern = str(Path(td) / "f%04d.pgm")
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-protocol_whitelist", "file",
+            "-i", str(video),
+            "-vf", f"fps=1/{interval:.4f},scale={probe_w}:-2,format=gray",
+            "-frames:v", str(samples),
+            "-y", pattern,
+        ]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0:
+            warnings.warn(
+                "--crop auto: ffmpeg frame-sampling failed (exit "
+                f"{proc.returncode}): "
+                f"{(proc.stderr or b'').decode(errors='replace').strip()[-300:]}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return None
+        pgm_paths = sorted(Path(td).glob("f*.pgm"))
+        if len(pgm_paths) < 3:
+            return None
+        try:
+            frames = [_read_pgm(p) for p in pgm_paths]
+        except (ValueError, OSError) as exc:
+            warnings.warn(
+                f"--crop auto: PGM parse failed ({exc}); skipping auto-detect",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return None
+
+    pw, ph, _ = frames[0]
+    if pw < 8 or ph < 8 or any(f[0] != pw or f[1] != ph for f in frames):
+        return None
+
+    n = pw * ph
+    motion = [0] * n
+    for i in range(1, len(frames)):
+        a, b = frames[i - 1][2], frames[i][2]
+        motion = [m + abs(bj - aj) for m, aj, bj in zip(motion, a, b)]
+
+    box = _trim_high_motion_edges(motion, pw, ph)
+    if box is None:
+        return None
+    x0, x1, y0, y1 = box
+    cw, ch = x1 - x0, y1 - y0
+    area = cw * ch
+    # Reject a region that is too small (over-trimmed) or barely trimmed at all (>92%
+    # area = uniform-motion noise that peeled a sliver -> a plausible-but-useless crop).
+    if area < 0.40 * n or area > 0.92 * n:
+        return None
+
+    sx, sy = vw / pw, vh / ph
+    X = int(round(x0 * sx)) & ~1
+    Y = int(round(y0 * sy)) & ~1
+    W = int(round(cw * sx)) & ~1
+    H = int(round(ch * sy)) & ~1
+    W = min(W, (vw - X) & ~1)
+    H = min(H, (vh - Y) & ~1)
+    if W <= 0 or H <= 0:
+        return None
+    return f"{W}:{H}:{X}:{Y}"
+
+
 def validate_freeze_noise(noise: str) -> str:
     """Return `noise` if it is a valid freezedetect noise value, else raise.
 
@@ -431,7 +608,21 @@ def detect_slides_freeze(
     (0-255) are dropped after dedup — a cheap heuristic that removes dark IDE/terminal
     demo screens. Assumes light-background slides; leave off for dark-themed decks.
     """
-    if crop:
+    if crop == "auto":
+        vw, vh = probe_dimensions(video)
+        spec = detect_slide_crop(video, vw, vh)
+        if spec:
+            w, h, x, y = parse_crop(spec)
+            crop_vf = f"crop={w}:{h}:{x}:{y},"
+        else:
+            warnings.warn(
+                "--crop auto: slide-region detection unreliable; falling back to "
+                "--cam-corner/--caption (use explicit --crop W:H:X:Y for precision)",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            crop_vf = build_crop_vf(vw, vh, cam_corner, caption)
+    elif crop:
         w, h, x, y = parse_crop(crop)
         crop_vf = f"crop={w}:{h}:{x}:{y},"
     else:

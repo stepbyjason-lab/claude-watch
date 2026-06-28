@@ -3,9 +3,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import scripts.slides as slides
 from scripts.slides import (
     CandidateCapExceeded,
     build_crop_vf,
+    detect_slide_crop,
     detect_slides,
     detect_slides_freeze,
     dhash,
@@ -16,6 +18,8 @@ from scripts.slides import (
     probe_dimensions,
     validate_freeze_noise,
     _freeze_periods,
+    _read_pgm,
+    _trim_high_motion_edges,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_10s.mp4"
@@ -526,3 +530,276 @@ def test_mean_luma_white_vs_black(tmp_path):
                         "-i", f"color={color}:size=32x32", "-frames:v", "1", str(p)], check=True)
     assert mean_luma(white) >= 240
     assert mean_luma(black) <= 16
+
+
+# ---- auto-crop (--crop auto) -------------------------------------------------
+
+def _make_pgm(w: int, h: int, pixels: list[int]) -> bytes:
+    assert len(pixels) == w * h
+    return f"P5\n{w} {h}\n255\n".encode() + bytes(pixels)
+
+
+def test_read_pgm_parses_valid(tmp_path):
+    p = tmp_path / "f.pgm"
+    p.write_bytes(_make_pgm(3, 2, [0, 1, 2, 3, 4, 5]))
+    w, h, px = _read_pgm(p)
+    assert (w, h) == (3, 2)
+    assert list(px) == [0, 1, 2, 3, 4, 5]
+
+
+def test_read_pgm_rejects_non_p5(tmp_path):
+    p = tmp_path / "f.pgm"
+    p.write_bytes(b"P6\n3 2\n255\n" + bytes(6))
+    with pytest.raises(ValueError):
+        _read_pgm(p)
+
+
+def test_read_pgm_rejects_truncated_header(tmp_path):
+    p = tmp_path / "f.pgm"
+    p.write_bytes(b"P5\n3 2\n")  # missing maxval token and raster
+    with pytest.raises(ValueError):
+        _read_pgm(p)
+
+
+def test_read_pgm_rejects_short_pixels(tmp_path):
+    p = tmp_path / "f.pgm"
+    p.write_bytes(_make_pgm(3, 2, [0] * 6)[:-2])  # drop 2 raster bytes
+    with pytest.raises(ValueError):
+        _read_pgm(p)
+
+
+def test_trim_removes_high_motion_corner():
+    # 10x10 motion map: a 3x3 hot block top-right, rest quiet -> corner trimmed off.
+    pw = ph = 10
+    motion = [0] * (pw * ph)
+    for y in range(3):
+        for x in range(7, 10):
+            motion[y * pw + x] = 1000
+    box = _trim_high_motion_edges(motion, pw, ph)
+    assert box == (0, 7, 3, 10)  # right cols and top rows peeled
+
+
+def test_trim_fully_static_returns_full_frame():
+    # No motion anywhere -> nothing to trim -> the full-frame box (caller rejects it).
+    assert _trim_high_motion_edges([0] * 64, 8, 8) == (0, 8, 0, 8)
+
+
+def test_detect_slide_crop_none_on_probe_failure(monkeypatch, recwarn):
+    def boom(_v):
+        raise RuntimeError("no duration")
+
+    monkeypatch.setattr(slides, "_probe_duration", boom)
+    assert detect_slide_crop(Path("x.mp4"), 1920, 1080) is None
+    assert any("could not probe duration" in str(w.message) for w in recwarn.list)
+
+
+def test_detect_slide_crop_none_on_too_few_samples(monkeypatch):
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 60.0)
+    assert detect_slide_crop(Path("x.mp4"), 1920, 1080, samples=2) is None
+
+
+def test_detect_slide_crop_none_on_bad_dims(monkeypatch):
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 60.0)
+    assert detect_slide_crop(Path("x.mp4"), 0, 1080) is None
+
+
+def test_detect_slide_crop_none_on_ffmpeg_failure(monkeypatch, tmp_path, recwarn):
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 60.0)
+    monkeypatch.setattr(
+        slides.subprocess, "run",
+        lambda *a, **k: MagicMock(returncode=1, stderr=b"ffmpeg: boom"),
+    )
+    assert detect_slide_crop(tmp_path / "x.mp4", 1920, 1080) is None
+    assert any("ffmpeg frame-sampling failed" in str(w.message) for w in recwarn.list)
+
+
+def test_detect_slide_crop_warns_on_pgm_parse_failure(monkeypatch, recwarn):
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 24.0)
+
+    def fake_run(cmd, **kwargs):
+        pattern = cmd[-1]
+        for i in range(3):
+            Path(pattern % (i + 1)).write_bytes(b"P6 not-a-pgm")  # non-P5 -> ValueError
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(slides.subprocess, "run", fake_run)
+    assert detect_slide_crop(Path("x.mp4"), 1920, 1080, samples=3) is None
+    assert any("PGM parse failed" in str(w.message) for w in recwarn.list)
+
+
+def test_detect_slide_crop_excludes_moving_corner(monkeypatch):
+    # ffmpeg is faked to emit PGMs: a mid-gray frame with a flickering top-right
+    # corner (cam). The detector must trim that corner from the returned crop.
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 24.0)
+    pw, ph = 40, 24
+
+    def fake_run(cmd, **kwargs):
+        pattern = cmd[-1]  # ".../f%04d.pgm"
+        for i in range(6):
+            px = [128] * (pw * ph)
+            val = 0 if i % 2 == 0 else 255  # corner flickers each frame
+            for y in range(6):
+                for x in range(pw - 10, pw):
+                    px[y * pw + x] = val
+            Path(pattern % (i + 1)).write_bytes(_make_pgm(pw, ph, px))
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(slides.subprocess, "run", fake_run)
+    spec = detect_slide_crop(Path("x.mp4"), 1920, 1080, samples=6, probe_w=pw)
+    assert spec is not None
+    w, h, x, y = parse_crop(spec)
+    assert w < 1920  # right cam columns trimmed
+    assert y > 0     # top cam rows trimmed
+    assert x == 0    # static left edge kept
+
+
+def test_detect_slide_crop_none_when_whole_frame_static(monkeypatch):
+    # A uniform deck with no moving chrome -> full-frame box -> no crop benefit -> None.
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 24.0)
+    pw, ph = 40, 24
+
+    def fake_run(cmd, **kwargs):
+        pattern = cmd[-1]
+        for i in range(6):
+            # tiny global flicker only (no localized chrome) -> trims to nothing
+            px = [128 + (i % 2)] * (pw * ph)
+            Path(pattern % (i + 1)).write_bytes(_make_pgm(pw, ph, px))
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(slides.subprocess, "run", fake_run)
+    assert detect_slide_crop(Path("x.mp4"), 1920, 1080, samples=6, probe_w=pw) is None
+
+
+def test_detect_slides_freeze_auto_crop_falls_back_on_none(tmp_path, recwarn):
+    # crop="auto" with detection returning None must warn and fall back to cam/caption.
+    periods = [(0.0, 5.0)]
+
+    def fake_extract(video, scenes, **kwargs):
+        return [{"path": "0001_t00-02.jpg", "t": 2.0, "index": 1, "kind": "detected"}]
+
+    with patch("scripts.slides.detect_slide_crop", return_value=None), \
+         patch("scripts.slides.probe_dimensions", return_value=(1920, 1080)), \
+         patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])):
+        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="auto")
+    assert out["slides"]
+    assert any("falling back" in str(w.message) for w in recwarn.list)
+
+
+def test_detect_slides_freeze_auto_crop_uses_detected_spec(tmp_path):
+    # crop="auto" SUCCESS path: a detected spec must reach freeze + extract as crop_vf.
+    captured = {}
+
+    def fake_periods(video, *, crop_vf, hold, noise):
+        captured["freeze_crop_vf"] = crop_vf
+        return [(0.0, 5.0)]
+
+    def fake_extract(video, scenes, **kwargs):
+        captured["extract_crop_vf"] = kwargs.get("crop_vf")
+        return [{"path": "0001_t00-02.jpg", "t": 2.0, "index": 1, "kind": "detected"}]
+
+    with patch("scripts.slides.detect_slide_crop", return_value="1600:900:160:90"), \
+         patch("scripts.slides.probe_dimensions", return_value=(1920, 1080)), \
+         patch("scripts.slides._freeze_periods", side_effect=fake_periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])):
+        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="auto")
+    assert captured["freeze_crop_vf"] == "crop=1600:900:160:90,"
+    assert captured["extract_crop_vf"] == "crop=1600:900:160:90,"
+    assert out["slides"]
+
+
+def test_read_pgm_tolerates_multispace_header(tmp_path):
+    p = tmp_path / "f.pgm"
+    p.write_bytes(b"P5\n  4   3  \n255\n" + bytes(range(12)))
+    w, h, px = _read_pgm(p)
+    assert (w, h) == (4, 3)
+    assert px[0] == 0  # first raster byte intact (separator is a fixed +1, not a skip)
+
+
+def test_read_pgm_rejects_oversized_dims(tmp_path):
+    p = tmp_path / "f.pgm"
+    p.write_bytes(b"P5\n100000 100000\n255\n")  # crafted header -> bounded before slice
+    with pytest.raises(ValueError):
+        _read_pgm(p)
+
+
+def test_trim_removes_bottom_left_cam():
+    # cam on the opposite corner from the top-right test -> exercises the other two loops.
+    pw = ph = 10
+    motion = [0] * (pw * ph)
+    for y in range(7, 10):       # bottom rows
+        for x in range(0, 3):    # left cols
+            motion[y * pw + x] = 1000
+    assert _trim_high_motion_edges(motion, pw, ph) == (3, 10, 0, 7)
+
+
+def test_trim_collapses_to_none_when_all_edges_hot():
+    # uniform high motion -> every row/col peeled -> region collapses -> None.
+    pw = ph = 6
+    assert _trim_high_motion_edges([1000] * (pw * ph), pw, ph) is None
+
+
+def test_detect_slide_crop_none_on_zero_duration(monkeypatch):
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 0.0)
+    assert detect_slide_crop(Path("x.mp4"), 1920, 1080) is None
+
+
+def test_detect_slide_crop_none_on_mismatched_pgm_dims(monkeypatch):
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 24.0)
+
+    def fake_run(cmd, **kwargs):
+        pattern = cmd[-1]
+        for i, (w, h) in enumerate([(40, 24), (40, 22), (40, 24)], start=1):
+            Path(pattern % i).write_bytes(_make_pgm(w, h, [128] * (w * h)))
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(slides.subprocess, "run", fake_run)
+    assert detect_slide_crop(Path("x.mp4"), 1920, 1080, samples=3, probe_w=40) is None
+
+
+def test_detect_slide_crop_even_aligned_and_bounded(monkeypatch):
+    # SUCCESS path with odd source dims -> assert even-alignment + in-bounds + both axes trimmed.
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 24.0)
+    pw, ph = 41, 23
+
+    def fake_run(cmd, **kwargs):
+        pattern = cmd[-1]
+        for i in range(6):
+            px = [128] * (pw * ph)
+            val = 0 if i % 2 == 0 else 255
+            for y in range(6):
+                for x in range(pw - 10, pw):
+                    px[y * pw + x] = val
+            Path(pattern % (i + 1)).write_bytes(_make_pgm(pw, ph, px))
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(slides.subprocess, "run", fake_run)
+    spec = detect_slide_crop(Path("x.mp4"), 1920, 1081, samples=6, probe_w=pw)
+    assert spec is not None
+    w, h, x, y = parse_crop(spec)
+    assert w % 2 == 0 and h % 2 == 0 and x % 2 == 0 and y % 2 == 0  # yuv420 even-aligned
+    assert x + w <= 1920 and y + h <= 1081                          # clamped in-bounds
+    assert w < 1920 and h < 1081                                    # top-right cam trimmed on both axes
+
+
+def test_detect_slide_crop_none_when_overtrimmed(monkeypatch):
+    # thick moving border on all edges -> static centre <40% area -> None (over-trim guard).
+    monkeypatch.setattr(slides, "_probe_duration", lambda _v: 24.0)
+    pw, ph = 40, 24
+
+    def fake_run(cmd, **kwargs):
+        pattern = cmd[-1]
+        for i in range(6):
+            px = [128] * (pw * ph)
+            val = 0 if i % 2 == 0 else 255
+            for y in range(ph):
+                for x in range(pw):
+                    if x < 14 or x >= pw - 14 or y < 9 or y >= ph - 9:
+                        px[y * pw + x] = val
+            Path(pattern % (i + 1)).write_bytes(_make_pgm(pw, ph, px))
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr(slides.subprocess, "run", fake_run)
+    assert detect_slide_crop(Path("x.mp4"), 1920, 1080, samples=6, probe_w=pw) is None

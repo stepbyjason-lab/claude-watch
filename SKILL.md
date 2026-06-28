@@ -69,7 +69,7 @@ Optional flags:
 - `--out-dir DIR` — override library root
 - `--slides` — **slide-deck mode**: high-recall capture of a prepared deck (see *Slides mode* below)
 - `--detect {freeze,scene}` — slides detection (default `freeze`): freeze captures one frame per held/static screen (skips demo scroll-noise, output ∝ held screens not duration); `scene` = legacy scene-cut + coverage floor
-- `--crop W:H:X:Y` — slides freeze: explicit slide-region crop (needed for Zoom-style recordings where the cam/chat/taskbar aren't in a corner; without it freeze can't see the slide as "frozen")
+- `--crop W:H:X:Y` (or `auto`) — slides freeze: explicit slide-region crop, or `auto` to detect the static slide region automatically (needed for Zoom-style recordings where the cam/chat/taskbar aren't in a corner; without it freeze can't see the slide as "frozen")
 - `--hold SECONDS` — slides freeze: min seconds a screen must hold to count (default 5; lower = more recall + some held demo, higher = stricter)
 - `--freeze-noise -50dB` — slides freeze: change tolerance (must be negative dB or 0..1 ratio)
 - `--candidate-cap N` — slides safety cap on candidate frames (default 800)
@@ -105,6 +105,7 @@ screen, so demo scroll-noise is skipped and the count tracks held screens (not v
 
 - `--detect {freeze,scene}` (default `freeze`) — `freeze` = held-screen capture; `scene` = legacy scene-cut + coverage floor (use for fast-flip decks where slides show < `--hold`s).
 - `--crop W:H:X:Y` — explicit slide-region crop. **Needed for Zoom-style screen recordings** where the presenter cam / chat / taskbar aren't in a corner: freeze can't detect a "frozen" slide while that chrome keeps moving. Measure the slide rectangle from one extracted frame. Overrides `--cam-corner`/`--caption`.
+- `--crop auto` — instead of measuring `W:H:X:Y` by hand, sample frames and auto-detect the static slide region by trimming high-motion edge bands (presenter cam / chat / toolbar). Zero-dependency and best-effort: it works best when the moving chrome sits at the frame edges, and **falls back to `--cam-corner`/`--caption` (with a warning) when the source is full-screen, demo-heavy, or otherwise too uniform to localize a stable region** — so explicit `--crop W:H:X:Y` stays the precise option.
 - `--hold N` (default 5) — min seconds a screen must hold. Lower → more recall (also keeps held demo screens); higher → stricter (may miss briefly-shown slides).
 - `--freeze-noise -50dB` (default) — freeze change tolerance; must be negative dB or a 0..1 ratio.
 - `--candidate-cap N` (default 800) — safety cap on candidate frames before extraction.

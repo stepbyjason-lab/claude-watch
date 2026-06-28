@@ -88,7 +88,7 @@ def _validate_freeze_args(
         if candidate_cap <= 0:
             raise ValueError("--candidate-cap must be > 0")
         if detect == "freeze":
-            if crop:
+            if crop and crop != "auto":
                 slides_mod.parse_crop(crop)
             slides_mod.validate_freeze_noise(freeze_noise)
             # math.isfinite rejects nan/inf, which slip past a bare `<= 0` (nan
@@ -258,7 +258,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--detect", choices=["freeze", "scene"], default="freeze",
                    help="slides detection: freeze (held-screen capture, default) or "
                         "scene (legacy scene-cut + coverage floor)")
-    p.add_argument("--crop", help="slides freeze: explicit slide-region crop W:H:X:Y "
+    p.add_argument("--crop", help="slides freeze: explicit slide-region crop W:H:X:Y, "
+                   "or 'auto' to detect the static slide region automatically "
                    "(overrides --cam-corner/--caption; needed for non-corner cams/side chat)")
     p.add_argument("--hold", type=float, default=5.0,
                    help="slides freeze: min seconds a screen must hold to count as a slide")

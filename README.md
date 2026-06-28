@@ -66,8 +66,8 @@ for every mode — see [Note quality](#note-quality).
 > demo (scrolling code/browser) never settles, so demo scroll-noise is skipped and the output
 > count tracks held screens rather than video length (no candidate-cap blowups on multi-hour
 > videos). For screen recordings where the cam/chat/taskbar isn't in a corner (e.g. Zoom),
-> pass an explicit `--crop W:H:X:Y` for the slide region — freeze needs the moving chrome out
-> of frame. `--hold N` (default 5s) is the min hold; lower = higher recall (also keeps held
+> pass `--crop W:H:X:Y` for the slide region (or `--crop auto` to detect it automatically) —
+> freeze needs the moving chrome out of frame. `--hold N` (default 5s) is the min hold; lower = higher recall (also keeps held
 > demo screens), higher = stricter. Freeze does **not** separate slides from held demo screens
 > (that's a content judgment — leave it to the notes step); it removes the scroll-noise.
 > The previous scene-cut + coverage-floor detector is still available via `--detect scene`.
@@ -101,7 +101,7 @@ Run the suite with `python -m pytest -m "not network"`.
 
 Flags: `--start/--end`, `--max-frames`, `--resolution`, `--scene-threshold`, `--max-gap`, `--whisper local|groq|openai`, `--no-whisper`, `--out-dir`.
 
-Slides flags: `--slides`, `--detect freeze|scene` (default freeze), `--crop W:H:X:Y`, `--hold SECONDS` (default 5), `--freeze-noise -50dB`, `--candidate-cap N` (default 800), `--prefer-light` + `--light-threshold N` (default 80), `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`.
+Slides flags: `--slides`, `--detect freeze|scene` (default freeze), `--crop W:H:X:Y|auto`, `--hold SECONDS` (default 5), `--freeze-noise -50dB`, `--candidate-cap N` (default 800), `--prefer-light` + `--light-threshold N` (default 80), `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`.
 
 > **`--prefer-light` (opt-in, freeze only).** After freeze capture, drops frames whose mean brightness is below `--light-threshold` (0–255, default 80) — a cheap way to discard dark IDE/terminal *demo* screens and cut downstream token cost further. Assumes light-background slides: **leave it off for dark-themed decks** (their slides would be dropped). It removes dark demos, not light-background ones — final slide selection still belongs to the notes step.
 
