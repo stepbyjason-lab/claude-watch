@@ -89,5 +89,27 @@ re-run with explicit `--crop`. Pixel-motion can't separate a talking-head cam fr
 slide text; a vision pass on a single frame can. See the `--crop auto` notes in
 SKILL.md for the step-by-step.
 
+### Verified end to end on recording B
+
+This is not just a recommendation — it was run on the recording that defeated
+`--crop auto`:
+
+1. Extracted one frame (a 1280-wide grid overlay, each cell = 256 px of source) and
+   read off the slide rectangle by eye: cam-gallery bar above y≈256, chat panel right
+   of x≈2048, toolbar below y≈1408 → `--crop 2048:1152:0:256` (source is 2560×1600).
+2. Applying that crop at four timepoints confirmed the geometry: slide frames came out
+   clean (chat / toolbar / cam-bar gone; only the small floating presenter cam remains,
+   over empty slide space).
+3. Ran `watch.py --slides --crop 2048:1152:0:256` on a 12-min slide-heavy clip →
+   **`slides_extracted: 15`**, of which **~12 are clean prepared slides** ("분리가 답이
+   아니라 설계가 답이다", "LLM Wiki 3-Layer", "qmd 5 검색법", "RAG는 소비, Wiki는 자본",
+   …) and ~3 are held demo screens (Discord / IDE), exactly the slide-vs-demo split the
+   notes step is meant to resolve.
+
+So the same recording that returned `None` under `--crop auto` (motion heuristic)
+yields cleanly-cropped slides under an **LLM-measured** `--crop`. The field record is:
+**auto path 0/2 (correct safe declines); LLM-assisted path 1/1 (recording B verified)**.
+The layer change is the fix, and it's demonstrated, not asserted.
+
 Companion to [`2026-06-27-demo-heavy-seminar-coverage.md`](2026-06-27-demo-heavy-seminar-coverage.md)
 (notes-coverage on recording A).
