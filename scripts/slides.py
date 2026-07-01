@@ -127,12 +127,19 @@ def phash_dedup(
     drop_dist: int = 4,
     flag_dist: int = 10,
     hash_fn: Callable[[str | Path, str], int] = dhash,
+    hash_cache: dict[str, int] | None = None,
 ) -> tuple[list[dict], list[tuple[float, float, int]]]:
     """Drop frames near-identical to the last KEPT frame; keep and flag borderline pairs.
 
     `flag_dist` must be > `drop_dist`. Otherwise borderline frames
     (drop_dist < distance <= flag_dist) would be silently dropped instead of
     flagged, breaking the high-recall guarantee.
+
+    If `hash_cache` is given, every hash computed here for a frame that survives
+    dedup (i.e. every "last kept" hash) is stored into it as `{path: hash}`. A
+    caller that runs a second hash-based pass (e.g. `time_aware_merge`) over the
+    same kept records with the same `hash_fn`/`crop_vf` can pass this cache in to
+    skip recomputing hashes that are already known.
     """
     if flag_dist <= drop_dist:
         raise ValueError(
@@ -150,6 +157,8 @@ def phash_dedup(
             kept.append(rec)
             last_hash = current_hash
             last_rec = rec
+            if hash_cache is not None:
+                hash_cache[rec["path"]] = current_hash
             continue
 
         distance = hamming(current_hash, last_hash)
@@ -160,8 +169,72 @@ def phash_dedup(
         kept.append(rec)
         last_hash = current_hash
         last_rec = rec
+        if hash_cache is not None:
+            hash_cache[rec["path"]] = current_hash
 
     return kept, flagged
+
+
+def time_aware_merge(
+    records: list[dict],
+    *,
+    crop_vf: str = "",
+    merge_gap_s: float = 15.0,
+    merge_dist: int = 11,
+    hash_fn: Callable[[str | Path, str], int] = dhash,
+    hash_cache: dict[str, int] | None = None,
+) -> tuple[list[dict], list[tuple[float, float, int, float]]]:
+    """Freeze-only post-pass. Drop a frame into the previous KEPT frame iff it is BOTH
+    close in time (gap < merge_gap_s) AND close in hash (dist <= merge_dist) — an
+    animation/scroll build-step of the same screen, not a genuine re-show or new slide.
+    Compares only to the last KEPT frame (same structure as phash_dedup) — a merged
+    (dropped) frame never becomes the comparison anchor for the next frame, so a chain
+    of small build-steps all collapse toward the first frame of the chain instead of
+    drifting away one small step at a time.
+
+    Returns `(kept, merged)`. `merged` records what got folded away, as
+    `(prev_kept_t, dropped_t, dist, gap)` tuples, so a caller can surface it to the
+    user the same way `phash_dedup` surfaces its `flagged` borderline pairs — this
+    pass is otherwise a silent drop, and its default `merge_dist` (11) is looser than
+    `phash_dedup`'s `flag_dist` (10), so a genuinely distinct slide can be folded away
+    with no visible trace unless the caller prints `merged`.
+
+    `hash_cache` (optional) is a `{path: hash}` map of already-computed hashes (e.g.
+    from `phash_dedup`, which uses the same `hash_fn`/`crop_vf` at the freeze call
+    site) — consulted before calling `hash_fn`, to avoid re-hashing every kept frame
+    a second time. Not supplying it (the default) preserves the original behavior of
+    always computing via `hash_fn`, so unit tests injecting a fake `hash_fn` still work.
+    """
+    kept: list[dict] = []
+    merged: list[tuple[float, float, int, float]] = []
+    last_hash: int | None = None
+    last_t: float | None = None
+
+    def _hash(rec: dict) -> int:
+        path = rec["path"]
+        if hash_cache is not None and path in hash_cache:
+            return hash_cache[path]
+        return hash_fn(path, crop_vf)
+
+    for rec in records:
+        if last_hash is None:
+            kept.append(rec)
+            last_hash = _hash(rec)
+            last_t = rec["t"]
+            continue
+
+        gap = rec["t"] - last_t
+        current_hash = _hash(rec)
+        distance = hamming(current_hash, last_hash)
+        if gap < merge_gap_s and distance <= merge_dist:
+            merged.append((last_t, rec["t"], distance, gap))
+            continue
+
+        kept.append(rec)
+        last_hash = current_hash
+        last_t = rec["t"]
+
+    return kept, merged
 
 
 def probe_dimensions(video: Path) -> tuple[int, int]:
@@ -595,6 +668,8 @@ def detect_slides_freeze(
     candidate_cap: int = 800,
     prefer_light: bool = False,
     light_threshold: float = 80.0,
+    merge_gap_s: float = 15.0,
+    merge_dist: int = 11,
 ) -> dict:
     """Capture one frame per *held* (frozen) screen region, then dedup.
 
@@ -607,6 +682,17 @@ def detect_slides_freeze(
     With `prefer_light`, frames whose mean brightness is below `light_threshold`
     (0-255) are dropped after dedup — a cheap heuristic that removes dark IDE/terminal
     demo screens. Assumes light-background slides; leave off for dark-themed decks.
+
+    After dedup, `time_aware_merge` collapses animation/scroll build-steps that are
+    both close in time (< `merge_gap_s`) and close in hash (<= `merge_dist`) into the
+    preceding kept frame. Pass `merge_gap_s <= 0` or `merge_dist <= 0` to disable this
+    pass entirely and restore byte-identical pre-merge (R05) behavior.
+
+    The merged pairs are returned as `result["merged"]` (mirroring `result["flagged"]`
+    from `phash_dedup`) so a caller can surface exactly what got folded away — this
+    pass is otherwise a silent drop, and its default `merge_dist` (11) is looser than
+    `flag_dist` (10), so a genuinely distinct slide shown within `merge_gap_s` could
+    vanish with no visible trace if the caller doesn't print `merged`.
     """
     if crop == "auto":
         vw, vh = probe_dimensions(video)
@@ -653,9 +739,22 @@ def detect_slides_freeze(
             {**rec, "path": str((out_dir / rec["path"]).resolve())} for rec in records
         ]
         # Frames are already cropped on disk, so dedup hashes them as-is (crop_vf="").
+        # hash_cache collects the per-kept-frame dhash phash_dedup already computed,
+        # so the merge pass below can reuse it instead of re-hashing the same JPEGs
+        # (both passes use the same hash_fn=dhash / crop_vf="" at this call site).
+        hash_cache: dict[str, int] = {}
         kept, flagged = phash_dedup(
-            absolute_records, crop_vf="", drop_dist=drop_dist, flag_dist=flag_dist
+            absolute_records, crop_vf="", drop_dist=drop_dist, flag_dist=flag_dist,
+            hash_cache=hash_cache,
         )
+        # merge_gap_s/merge_dist <= 0 disables the pass entirely, restoring R05
+        # byte-identical behavior.
+        merged: list[tuple[float, float, int, float]] = []
+        if merge_gap_s > 0 and merge_dist > 0:
+            kept, merged = time_aware_merge(
+                kept, crop_vf="", merge_gap_s=merge_gap_s, merge_dist=merge_dist,
+                hash_cache=hash_cache,
+            )
     except Exception:
         # A mid-run ffmpeg/dhash failure leaves partial JPEGs. Remove only the frames
         # THIS run created (set-diff vs the pre-run snapshot) so a direct library caller
@@ -703,4 +802,4 @@ def detect_slides_freeze(
             )
         slides = bright
 
-    return {"slides": slides, "flagged": flagged}
+    return {"slides": slides, "flagged": flagged, "merged": merged}

@@ -16,6 +16,7 @@ from scripts.slides import (
     parse_crop,
     phash_dedup,
     probe_dimensions,
+    time_aware_merge,
     validate_freeze_noise,
     _freeze_periods,
     _read_pgm,
@@ -171,6 +172,22 @@ def test_dedup_keeps_clearly_distinct_without_flag():
     )
     assert [r["t"] for r in kept] == [0.0, 1.0]
     assert flagged == []
+
+
+def test_dedup_populates_hash_cache_for_kept_frames_only():
+    # FIX 4 (perf): phash_dedup can optionally record the hash of every frame it
+    # keeps into a caller-supplied dict, so a later pass (time_aware_merge) reusing
+    # the same hash_fn/crop_vf doesn't need to recompute them. Dropped frames are
+    # not cached — nothing downstream needs their hash.
+    recs = _records([0, 1, 2])
+    hashes = {"/tmp/0.jpg": 0b0000, "/tmp/1.jpg": 0b0001, "/tmp/2.jpg": 0xFFFF}
+    cache: dict[str, int] = {}
+    kept, flagged = phash_dedup(
+        recs, crop_vf="", drop_dist=2, flag_dist=4,
+        hash_fn=lambda p, c: hashes[p], hash_cache=cache,
+    )
+    assert [r["t"] for r in kept] == [0.0, 2.0]  # frame 1 dropped (dist 1 <= drop_dist 2)
+    assert cache == {"/tmp/0.jpg": 0b0000, "/tmp/2.jpg": 0xFFFF}
 
 
 def test_dedup_rejects_flag_dist_not_greater_than_drop_dist():
@@ -336,9 +353,10 @@ def test_detect_slides_freeze_extracts_dedups_and_crops(tmp_path):
     orig_dedup = S.phash_dedup
     hashes = iter([0b0000, 0b0001, 0b1111_1111])
 
-    def fake_dedup(recs, *, crop_vf, drop_dist, flag_dist, hash_fn=None):
+    def fake_dedup(recs, *, crop_vf, drop_dist, flag_dist, hash_fn=None, hash_cache=None):
         return orig_dedup(recs, crop_vf=crop_vf, drop_dist=drop_dist,
-                          flag_dist=flag_dist, hash_fn=lambda p, c="": next(hashes))
+                          flag_dist=flag_dist, hash_fn=lambda p, c="": next(hashes),
+                          hash_cache=hash_cache)
 
     with patch("scripts.slides._freeze_periods", return_value=periods), \
          patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
@@ -346,6 +364,7 @@ def test_detect_slides_freeze_extracts_dedups_and_crops(tmp_path):
         out = detect_slides_freeze(
             Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
             hold=5.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=0,  # this test targets phash_dedup only, not the R06 merge pass
         )
     assert len(out["slides"]) == 2  # 3 extracted, 1 deduped
     # The *correct* file survives: exactly the kept records' files remain on disk
@@ -392,7 +411,8 @@ def test_detect_slides_freeze_capture_is_mid_freeze_with_cap(tmp_path):
     with patch("scripts.slides._freeze_periods", return_value=periods), \
          patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])):
-        detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0", hold=6.0)
+        detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0", hold=6.0,
+                             merge_gap_s=0)  # capture-timing test, not merge behavior
     assert captured["t"] == [12.0, 23.0, 33.0]
 
 
@@ -456,7 +476,7 @@ def test_detect_slides_freeze_prefer_light_drops_dark(tmp_path):
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
          patch("scripts.slides.mean_luma", side_effect=lambda p: luma[Path(p).name]):
         out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
-                                   prefer_light=True, light_threshold=80.0)
+                                   prefer_light=True, light_threshold=80.0, merge_gap_s=0)
     names = [Path(s["path"]).name for s in out["slides"]]
     assert names == ["0001_t00-01.jpg", "0003_t00-03.jpg"]  # dark (30) dropped
     assert [s["index"] for s in out["slides"]] == [1, 2]     # reindexed 1-based
@@ -470,7 +490,7 @@ def test_detect_slides_freeze_prefer_light_off_keeps_all_and_skips_luma(tmp_path
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
          patch("scripts.slides.mean_luma", side_effect=AssertionError("must not be called")):
         out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
-                                   prefer_light=False)
+                                   prefer_light=False, merge_gap_s=0)
     assert len(out["slides"]) == 3  # off → no brightness filtering, mean_luma not called
 
 
@@ -481,7 +501,7 @@ def test_detect_slides_freeze_prefer_light_all_dropped_warns(tmp_path, recwarn):
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
          patch("scripts.slides.mean_luma", side_effect=lambda p: 10):  # all dark
         out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
-                                   prefer_light=True, light_threshold=80.0)
+                                   prefer_light=True, light_threshold=80.0, merge_gap_s=0)
     assert out["slides"] == []
     assert not list(tmp_path.glob("*.jpg"))  # all dropped files unlinked
     assert any("dropped all" in str(w.message) for w in recwarn.list)
@@ -495,7 +515,7 @@ def test_detect_slides_freeze_prefer_light_keeps_exactly_at_threshold(tmp_path):
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
          patch("scripts.slides.mean_luma", side_effect=lambda p: luma[Path(p).name]):
         out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
-                                   prefer_light=True, light_threshold=80.0)
+                                   prefer_light=True, light_threshold=80.0, merge_gap_s=0)
     # >= is inclusive: luma 80 == threshold is kept; 79 dropped
     assert [Path(s["path"]).name for s in out["slides"]] == ["0001_t00-01.jpg", "0003_t00-03.jpg"]
 
@@ -514,11 +534,348 @@ def test_detect_slides_freeze_prefer_light_failopen_on_luma_error(tmp_path, recw
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
          patch("scripts.slides.mean_luma", side_effect=luma):
         out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
-                                   prefer_light=True, light_threshold=80.0)
+                                   prefer_light=True, light_threshold=80.0, merge_gap_s=0)
     names = [Path(s["path"]).name for s in out["slides"]]
     assert names == ["0001_t00-01.jpg", "0002_t00-02.jpg", "0003_t00-03.jpg"]  # failed frame kept
     assert [s["index"] for s in out["slides"]] == [1, 2, 3]
     assert any("mean_luma failed" in str(w.message) for w in recwarn.list)
+
+
+# ---- time-aware merge (R06 --hold recall fix) --------------------------------
+
+def _trecs(ts):
+    return [{"index": i + 1, "t": float(t), "path": f"/tmp/m{i}.jpg"} for i, t in enumerate(ts)]
+
+
+def test_time_aware_merge_drops_when_gap_and_dist_both_close():
+    # gap=10 < 15, dist=3 <= 11 -> merge (animation build-step)
+    recs = _trecs([0, 10])
+    hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=lambda p, c: hashes[p])
+    assert [r["t"] for r in kept] == [0.0]
+    assert merged == [(0.0, 10.0, 3, 10.0)]
+
+
+def test_time_aware_merge_keeps_when_time_far():
+    # gap=20 >= 15 (time far) even though dist=3 <= 11 -> keep (genuine re-show/new slide)
+    recs = _trecs([0, 20])
+    hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=lambda p, c: hashes[p])
+    assert [r["t"] for r in kept] == [0.0, 20.0]
+    assert merged == []
+
+
+def test_time_aware_merge_keeps_when_dist_far():
+    # gap=5 < 15 (time close) but dist=64 (hash far) -> keep (a different slide)
+    recs = _trecs([0, 5])
+    hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0xFFFFFFFFFFFFFFFF}
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=lambda p, c: hashes[p])
+    assert [r["t"] for r in kept] == [0.0, 5.0]
+    assert merged == []
+
+
+def test_time_aware_merge_boundary_gap_equal_threshold_is_not_merged():
+    # gap == merge_gap_s: rule is gap < merge_gap_s (strict), so gap==15 does NOT merge.
+    recs = _trecs([0, 15])
+    hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=lambda p, c: hashes[p])
+    assert [r["t"] for r in kept] == [0.0, 15.0]
+    assert merged == []
+
+
+def test_time_aware_merge_boundary_dist_equal_threshold_is_merged():
+    # dist == merge_dist: rule is dist <= merge_dist (inclusive), so dist==11 DOES merge.
+    recs = _trecs([0, 10])
+    hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0b111_1111_1111}  # 11 bits set -> dist 11
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=lambda p, c: hashes[p])
+    assert [r["t"] for r in kept] == [0.0]
+    assert merged == [(0.0, 10.0, 11, 10.0)]
+
+
+def test_time_aware_merge_disabled_when_merge_gap_zero():
+    recs = _trecs([0, 1, 2])
+    hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0, "/tmp/m2.jpg": 0}
+    kept, merged = time_aware_merge(recs, merge_gap_s=0, merge_dist=11,
+                                     hash_fn=lambda p, c: hashes[p])
+    assert kept == recs
+    assert merged == []
+
+
+def test_time_aware_merge_at_dist_zero_only_merges_identical_hashes():
+    # time_aware_merge itself has no special-case for merge_dist=0 — the disable-on-0
+    # gate lives in the caller (detect_slides_freeze). At the function level, dist<=0
+    # simply means "only bit-identical frames merge" — verify that raw rule directly.
+    recs = _trecs([0, 1, 2])
+    hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0, "/tmp/m2.jpg": 0b1}
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=0,
+                                     hash_fn=lambda p, c: hashes[p])
+    # m1 (dist 0 from m0) merges; m2 (dist 1 from last-kept m0) is kept.
+    assert [r["t"] for r in kept] == [0.0, 2.0]
+    assert merged == [(0.0, 1.0, 0, 1.0)]
+
+
+def test_time_aware_merge_empty_input():
+    kept, merged = time_aware_merge([], merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
+    assert kept == []
+    assert merged == []
+
+
+def test_time_aware_merge_single_record():
+    recs = _trecs([0])
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
+    assert kept == recs
+    assert merged == []
+
+
+def test_time_aware_merge_chains_through_multiple_builds():
+    # 3-frame animation build (each close to the previous) all collapse to the first;
+    # a 4th frame far in time is kept separately.
+    recs = _trecs([0, 5, 9, 100])
+    hashes = {
+        "/tmp/m0.jpg": 0b000,
+        "/tmp/m1.jpg": 0b001,
+        "/tmp/m2.jpg": 0b011,
+        "/tmp/m3.jpg": 0b011,
+    }
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=lambda p, c: hashes[p])
+    assert [r["t"] for r in kept] == [0.0, 100.0]
+    # each merged-in frame is recorded against the last KEPT frame (t=0), not the
+    # previous frame in the chain (last-seen) — see test_time_aware_merge_compares_to_last_kept.
+    assert merged == [(0.0, 5.0, 1, 5.0), (0.0, 9.0, 2, 9.0)]
+
+
+def test_time_aware_merge_compares_to_last_kept_not_last_seen():
+    # 3-frame chain: frame1 (dist 1 from frame0) merges into frame0. frame2 must then
+    # be compared against frame0 (the last KEPT frame), NOT frame1 (merged/last-seen).
+    # hash0=0b0000, hash1=0b0001 (dist 1 from hash0 -> merges).
+    # hash2 is chosen so hamming(hash2, hash0) > 11 (far from last-KEPT -> must be kept)
+    # but hamming(hash2, hash1) <= 11 (close to last-SEEN -> would wrongly merge if the
+    # loop tracked last-seen instead of last-kept).
+    # hash0 = 0, hash1 = 0b1, hash2 = 0xFFF (12 bits set).
+    #   hamming(hash2, hash0) = 12 (> 11 -> keep if compared to last-KEPT, correct)
+    #   hamming(hash2, hash1) = 11 (<= 11 -> would merge if compared to last-SEEN, wrong)
+    recs = _trecs([0, 10, 19])  # all gaps (10, 9) < 15 so time never gates this test
+    hashes = {"/tmp/m0.jpg": 0b0, "/tmp/m1.jpg": 0b1, "/tmp/m2.jpg": 0xFFF}
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=lambda p, c: hashes[p])
+    assert [r["t"] for r in kept] == [0.0, 19.0]
+    assert merged == [(0.0, 10.0, 1, 10.0)]
+
+
+def test_time_aware_merge_consults_hash_cache_before_hash_fn():
+    # FIX 4 (perf): when hash_cache has an entry for a frame's path, time_aware_merge
+    # must use it instead of calling hash_fn — verified here by making hash_fn raise
+    # for any path present in the cache.
+    recs = _trecs([0, 10])
+    cache = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
+
+    def hash_fn_must_not_be_called(p, c):
+        raise AssertionError(f"hash_fn should not be called for cached path {p}")
+
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=hash_fn_must_not_be_called,
+                                     hash_cache=cache)
+    assert [r["t"] for r in kept] == [0.0]
+    assert merged == [(0.0, 10.0, 3, 10.0)]
+
+
+def test_time_aware_merge_falls_back_to_hash_fn_when_not_in_cache():
+    # A hash_cache that's missing an entry (or None, the default) must still work via
+    # hash_fn — the cache is a pure optimization, not a required input.
+    recs = _trecs([0, 10])
+    hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
+    cache: dict[str, int] = {}  # empty — nothing precomputed
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=lambda p, c: hashes[p], hash_cache=cache)
+    assert [r["t"] for r in kept] == [0.0]
+
+
+def test_time_aware_merge_large_gap_same_hash_is_reshow_not_merge():
+    # Identical hash at a gap >= merge_gap_s must be KEPT — a deliberate re-show of the
+    # same slide, not an animation build-step. Proves the gap gate applies even when
+    # the hash matches exactly (dist=0, the closest possible hash distance).
+    recs = _trecs([0, 20])
+    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
+                                     hash_fn=lambda p, c: 0)
+    assert [r["t"] for r in kept] == [0.0, 20.0]
+    assert merged == []
+
+
+def test_detect_slides_freeze_merge_gap_zero_skips_merge_pass(tmp_path):
+    periods = [(10.0, 6.0), (30.0, 6.0), (50.0, None)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    import scripts.slides as S
+    orig_dedup = S.phash_dedup
+    hashes = iter([0b0000, 0b0001, 0b1111_1111])
+
+    def fake_dedup(recs, *, crop_vf, drop_dist, flag_dist, hash_fn=None, hash_cache=None):
+        return orig_dedup(recs, crop_vf=crop_vf, drop_dist=drop_dist,
+                          flag_dist=flag_dist, hash_fn=lambda p, c="": next(hashes),
+                          hash_cache=hash_cache)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("time_aware_merge must not run when merge_gap_s<=0")
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=fake_dedup), \
+         patch("scripts.slides.time_aware_merge", side_effect=fail_if_called):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=5.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=0, merge_dist=11,
+        )
+    # Same result as the pre-R06 baseline test: 3 extracted, 1 deduped, merge skipped.
+    assert len(out["slides"]) == 2
+    remaining = {p.name for p in tmp_path.glob("*.jpg")}
+    kept_names = {Path(s["path"]).name for s in out["slides"]}
+    assert remaining == kept_names
+
+
+def test_detect_slides_freeze_merge_dist_zero_also_skips_merge_pass(tmp_path):
+    periods = [(10.0, 6.0), (30.0, 6.0), (50.0, None)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    import scripts.slides as S
+    orig_dedup = S.phash_dedup
+    hashes = iter([0b0000, 0b0001, 0b1111_1111])
+
+    def fake_dedup(recs, *, crop_vf, drop_dist, flag_dist, hash_fn=None, hash_cache=None):
+        return orig_dedup(recs, crop_vf=crop_vf, drop_dist=drop_dist,
+                          flag_dist=flag_dist, hash_fn=lambda p, c="": next(hashes),
+                          hash_cache=hash_cache)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("time_aware_merge must not run when merge_dist<=0")
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=fake_dedup), \
+         patch("scripts.slides.time_aware_merge", side_effect=fail_if_called):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=5.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=15.0, merge_dist=0,
+        )
+    assert len(out["slides"]) == 2
+
+
+def _dhash_bits_to_gray_bytes(bits64: int) -> bytes:
+    """Build a 9x8 grayscale raw buffer (as ffmpeg's dhash filtergraph would emit)
+    whose decoded dhash is exactly `bits64` — lets a test fake the ffmpeg subprocess
+    call inside `dhash` while still exercising `dhash`'s real bit-decoding logic."""
+    flat = bytearray()
+    pos = 0
+    for _row in range(8):
+        vals = [128]
+        for _col in range(8):
+            bit = (bits64 >> pos) & 1
+            vals.append(vals[-1] - 1 if bit else vals[-1] + 1)
+            pos += 1
+        flat.extend(vals)
+    assert len(flat) == 72
+    return bytes(flat)
+
+
+def test_detect_slides_freeze_real_merge_end_to_end(tmp_path):
+    # Unlike the mocked-time_aware_merge tests above, this exercises the REAL
+    # phash_dedup + REAL time_aware_merge running back to back (patching only the
+    # ffmpeg subprocess call inside `dhash`, not `dhash` itself — `phash_dedup`'s
+    # default hash_fn is bound to the real `dhash` at def time, so patching the
+    # module-level name wouldn't be seen by it). 3 held periods: frame1/frame2 are
+    # distinct enough to both survive phash_dedup (dist 12 > flag_dist 10), but
+    # frame2/frame3 are close enough in both time and hash to merge (gap=1<15,
+    # dist=10<=11).
+    periods = [(1.0, 4.0), (10.0, 4.0), (11.0, 4.0)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    hashes_by_name = {"0001.jpg": 0b0000, "0002.jpg": 0xFFF, "0003.jpg": 0b0011}
+
+    def fake_run(cmd, **kwargs):
+        image_path = cmd[cmd.index("-i") + 1]
+        bits = hashes_by_name[Path(image_path).name]
+        return MagicMock(returncode=0, stdout=_dhash_bits_to_gray_bytes(bits))
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.subprocess.run", side_effect=fake_run):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=4.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=15.0, merge_dist=11,
+        )
+    # scene t = period start + min(dur/2, 3.0): starts 1/10/11 (dur 4) -> t 3/12/13.
+    # frame1 (t=3) and frame2 (t=12) both survive phash_dedup (dist 12 > flag_dist 10);
+    # time_aware_merge then folds frame3 (t=13) into frame2 (gap=1<15, dist=10<=11).
+    assert [s["t"] for s in out["slides"]] == [3.0, 12.0]
+    assert [s["index"] for s in out["slides"]] == [1, 2]  # reindexed 1..N
+    remaining = {p.name for p in tmp_path.glob("*.jpg")}
+    kept_names = {Path(s["path"]).name for s in out["slides"]}
+    assert remaining == kept_names  # the merged-out frame's file was unlinked
+    assert out["merged"] == [(12.0, 13.0, 10, 1.0)]
+
+
+def test_detect_slides_freeze_applies_merge_and_unlinks_reindexes(tmp_path):
+    # 3 kept-by-dedup frames at t=1,10,11 (all distinct enough to survive phash_dedup);
+    # time_aware_merge then merges the t=10/t=11 pair (gap=1<15, dist close) into t=1's
+    # successor boundary — i.e. only t=1 and t=10 survive, t=11 is unlinked + reindexed.
+    periods = [(1.0, 4.0), (10.0, 4.0), (11.0, 4.0)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    # phash_dedup keeps all 3 (all far apart); time_aware_merge then merges the last
+    # pair (close in both time and hash).
+    fake_merged = [(10.0, 11.0, 3, 1.0)]
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
+         patch("scripts.slides.time_aware_merge",
+               side_effect=lambda recs, **k: (recs[:2], fake_merged)):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=4.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=15.0, merge_dist=11,
+        )
+    assert len(out["slides"]) == 2
+    assert [s["index"] for s in out["slides"]] == [1, 2]  # reindexed
+    remaining = {p.name for p in tmp_path.glob("*.jpg")}
+    kept_names = {Path(s["path"]).name for s in out["slides"]}
+    assert remaining == kept_names  # the merged-out frame's file was unlinked
+    assert out["merged"] == fake_merged  # merged pairs surfaced on the result dict
 
 
 @pytest.mark.integration
@@ -682,7 +1039,7 @@ def test_detect_slides_freeze_auto_crop_falls_back_on_none(tmp_path, recwarn):
          patch("scripts.slides._freeze_periods", return_value=periods), \
          patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])):
-        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="auto")
+        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="auto", merge_gap_s=0)
     assert out["slides"]
     assert any("falling back" in str(w.message) for w in recwarn.list)
 
@@ -704,7 +1061,7 @@ def test_detect_slides_freeze_auto_crop_uses_detected_spec(tmp_path):
          patch("scripts.slides._freeze_periods", side_effect=fake_periods), \
          patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])):
-        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="auto")
+        out = detect_slides_freeze(Path("v.mp4"), out_dir=tmp_path, crop="auto", merge_gap_s=0)
     assert captured["freeze_crop_vf"] == "crop=1600:900:160:90,"
     assert captured["extract_crop_vf"] == "crop=1600:900:160:90,"
     assert out["slides"]

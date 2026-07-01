@@ -77,12 +77,12 @@ def _validate_slides_focus(*, slides: bool, focus) -> None:
 
 def _validate_freeze_args(
     *, detect: str, crop, freeze_noise: str, hold: float, candidate_cap: int,
-    light_threshold: float = 80.0,
+    light_threshold: float = 80.0, merge_gap_s: float = 15.0, merge_dist: int = 11,
 ) -> None:
     """Fail fast on bad slides knobs before any download/extraction work.
 
-    candidate_cap applies to both detect modes; crop/freeze_noise/hold/light_threshold
-    only to freeze.
+    candidate_cap applies to both detect modes; crop/freeze_noise/hold/light_threshold/
+    merge_gap_s/merge_dist only to freeze.
     """
     try:
         if candidate_cap <= 0:
@@ -97,6 +97,11 @@ def _validate_freeze_args(
                 raise ValueError("--hold must be a finite number > 0")
             if not math.isfinite(light_threshold) or not (0 <= light_threshold <= 255):
                 raise ValueError("--light-threshold must be in [0, 255]")
+            # 0 is allowed (disables the merge pass); negative or non-finite is not.
+            if not math.isfinite(merge_gap_s) or merge_gap_s < 0:
+                raise ValueError("--merge-gap must be a finite number >= 0")
+            if merge_dist < 0:
+                raise ValueError("--merge-dist must be >= 0")
     except ValueError as e:
         sys.exit(str(e))
 
@@ -114,6 +119,9 @@ def _slides_advisories(args) -> list[str]:
         if args.prefer_light:
             msgs.append("--prefer-light is ignored with --detect scene "
                         "(brightness filtering applies to freeze mode only)")
+        if args.merge_gap != 15.0 or args.merge_dist != 11:
+            msgs.append("--merge-gap/--merge-dist are ignored with --detect scene "
+                        "(time-aware merge applies to freeze mode only)")
     return msgs
 
 
@@ -140,8 +148,10 @@ def _prefix_frame_paths(records: list[dict]) -> list[dict]:
 def select_scenes(video, meta, args, focus, work, *, cached):
     """Mode-dispatched detect + extract step.
 
-    Returns (frame_records, scenes, flagged), with frame paths relative to the
-    library directory and frame files already written.
+    Returns (frame_records, scenes, flagged, merged), with frame paths relative to
+    the library directory and frame files already written. `merged` is only
+    populated in freeze-detect mode (the time-aware merge pass); scene mode and
+    classic mode always return an empty list for it.
     """
     frames_dir = work / "frames"
 
@@ -175,10 +185,12 @@ def select_scenes(video, meta, args, focus, work, *, cached):
                 candidate_cap=args.candidate_cap,
                 prefer_light=args.prefer_light,
                 light_threshold=args.light_threshold,
+                merge_gap_s=args.merge_gap,
+                merge_dist=args.merge_dist,
             )
         frame_records = _prefix_frame_paths(result["slides"])
         scenes = [{"t": fr["t"], "score": 1.0, "kind": fr["kind"]} for fr in result["slides"]]
-        return frame_records, scenes, result["flagged"]
+        return frame_records, scenes, result["flagged"], result.get("merged", [])
 
     scenes_path = work / "scenes.json"
     if cached and scenes_path.exists() and not focus:
@@ -218,7 +230,7 @@ def select_scenes(video, meta, args, focus, work, *, cached):
     )
     frame_records = _prefix_frame_paths(raw_frame_records)
     scenes = [{"t": s.t, "score": s.score, "kind": s.kind} for s in capped]
-    return frame_records, scenes, []
+    return frame_records, scenes, [], []
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -272,6 +284,16 @@ def main(argv: list[str] | None = None) -> int:
                         "(opt-in; assumes light-background slides — leave off for dark decks)")
     p.add_argument("--light-threshold", type=float, default=80.0,
                    help="slides freeze: mean-grayscale cutoff 0-255 for --prefer-light (default 80)")
+    p.add_argument("--merge-gap", type=float, default=15.0,
+                   help="slides freeze: max seconds between held frames to merge as an "
+                        "animation/scroll build-step (freeze-only; merge requires BOTH "
+                        "this AND --merge-dist to match, so setting EITHER to 0 disables "
+                        "the whole merge pass -> R05 behavior, not just this half of it)")
+    p.add_argument("--merge-dist", type=int, default=11,
+                   help="slides freeze: max hash distance to merge as a build-step "
+                        "(freeze-only; merge requires BOTH this AND --merge-gap to match, "
+                        "so setting EITHER to 0 disables the whole merge pass -> R05 "
+                        "behavior, not just this half of it)")
     args = p.parse_args(argv)
 
     if not _scheme_ok(args.source):
@@ -284,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
             detect=args.detect, crop=args.crop, freeze_noise=args.freeze_noise,
             hold=args.hold, candidate_cap=args.candidate_cap,
             light_threshold=args.light_threshold,
+            merge_gap_s=args.merge_gap, merge_dist=args.merge_dist,
         )
         for msg in _slides_advisories(args):
             print(f"warning: {msg}", file=sys.stderr)
@@ -314,6 +337,10 @@ def main(argv: list[str] | None = None) -> int:
             # threshold only affects output when prefer_light is on — keep it out of
             # the cache key otherwise so tweaking it alone doesn't force re-extraction.
             f"{args.light_threshold}" if args.prefer_light else "-",
+            # merge knobs only affect output in freeze mode (scene mode never runs
+            # time_aware_merge) — keep them out of the cache key otherwise, same
+            # reasoning as light_threshold above.
+            f"{args.merge_gap}|{args.merge_dist}" if args.detect == "freeze" else "-",
         ])
     else:
         meta["dl_resolution"] = "best"
@@ -398,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     # would also swallow genuine ffmpeg/programming failures into a terse exit, hiding
     # bugs. Real extraction failures keep their traceback (a loud signal, not silent).
     try:
-        frame_records, scenes, flagged = select_scenes(
+        frame_records, scenes, flagged, merged = select_scenes(
             video, meta, args, focus, work, cached=cached
         )
     except slides_mod.CandidateCapExceeded as e:
@@ -453,6 +480,11 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"review: near-dup t={int(ta)//60:02d}:{int(ta)%60:02d} "
                 f"~ t={int(tb)//60:02d}:{int(tb)%60:02d} (dist {d})"
+            )
+        for ta, tb, d, gap in merged:
+            print(
+                f"merged: t={int(ta)//60:02d}:{int(ta)%60:02d} "
+                f"~ t={int(tb)//60:02d}:{int(tb)%60:02d} (dist {d}, gap {gap:.1f}s)"
             )
     print()
     print("=== transcript ===")
