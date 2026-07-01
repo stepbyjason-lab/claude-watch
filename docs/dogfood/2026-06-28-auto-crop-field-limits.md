@@ -89,27 +89,62 @@ re-run with explicit `--crop`. Pixel-motion can't separate a talking-head cam fr
 slide text; a vision pass on a single frame can. See the `--crop auto` notes in
 SKILL.md for the step-by-step.
 
-### Verified end to end on recording B
+### Verified end to end on recording B — with two corrections from follow-up checks
 
-This is not just a recommendation — it was run on the recording that defeated
-`--crop auto`:
+This was run on the recording that defeated `--crop auto`, and the LLM-assisted
+**workflow** (read one frame, measure the slide rectangle, re-run with `--crop
+W:H:X:Y`) is confirmed valid and reproducible. Two follow-up verification passes,
+though, found the first write-up of this result was imprecise on two separate
+points. Both are corrected below rather than quietly re-asserted.
 
-1. Extracted one frame (a 1280-wide grid overlay, each cell = 256 px of source) and
-   read off the slide rectangle by eye: cam-gallery bar above y≈256, chat panel right
-   of x≈2048, toolbar below y≈1408 → `--crop 2048:1152:0:256` (source is 2560×1600).
-2. Applying that crop at four timepoints confirmed the geometry: slide frames came out
-   clean (chat / toolbar / cam-bar gone; only the small floating presenter cam remains,
-   over empty slide space).
-3. Ran `watch.py --slides --crop 2048:1152:0:256` on a 12-min slide-heavy clip →
-   **`slides_extracted: 15`**, of which **~12 are clean prepared slides** ("분리가 답이
-   아니라 설계가 답이다", "LLM Wiki 3-Layer", "qmd 5 검색법", "RAG는 소비, Wiki는 자본",
-   …) and ~3 are held demo screens (Discord / IDE), exactly the slide-vs-demo split the
-   notes step is meant to resolve.
+**Correction 1 — the crop coordinate itself had a small error.** The original
+measurement extracted one frame (a 1280-wide grid overlay, each cell = 256 px of
+source) and read the slide rectangle off the grid **by eye**: cam-gallery bar above
+y≈256, chat panel right of x≈2048, toolbar below y≈1408 → `--crop 2048:1152:0:256`
+(source is 2560×1600). That crop worked well enough to run, but it slightly
+**over-includes chrome**: the top edge cuts ~50px into the cam-gallery bar, and the
+right edge (x=2048) crosses ~40px past the real chat-panel boundary (the chat panel
+actually starts at source x≈2008). A blind re-measurement by a Sonnet agent, using
+per-pixel color-transition sampling instead of grid eyeballing, produced
+**`--crop 2000:1122:0:308`**, which cleanly excludes the cam-bar, chat, and toolbar
+(self-verified at 3 timepoints). Takeaway: **pixel-boundary sampling beats grid
+eyeballing** for this measurement step, and the precise crop for recording B is
+`~2000:1122:0:308`, not the earlier rounded `2048:1152:0:256`.
+
+**Correction 2 — `slides_extracted: 15` is a raw extraction count, not the true
+unique-slide count, and it was conflating two separate problems.** Running
+`watch.py --slides --crop 2048:1152:0:256` on a 12-min slide-heavy clip reported
+**`slides_extracted: 15`**. That number is close to correct by coincidence but is
+the **wrong set**: dense 3-second-interval sampling (240 frames) across the same
+clip established the true unique prepared-slide count is **~13-14**, and the
+`--hold 6` run that produced 15 actually **missed 4 short slides** (each shown only
+3-6s, at or under the hold threshold — "LLM Wiki 3-Layer" diagram, "Cross-Vault
+마이그레이션", "~100 소스·40만 단어", "퀴리가 수집처럼 누적된다") while
+**double-counting** some sub-slide states (cursor/bullet/build animations treated as
+separate slides). Lowering `--hold` does not fix this — it overshoots the other
+way: `--hold 3` → 22 slides, `--hold 2 --phash-dist 2` → 24 slides (animation
+near-duplicates logged as separate slides each time). The root cause is that this
+deck mixes very-short (3-6s) and very-long (~2min) slides, and **no single `--hold`
+threshold handles both**.
+
+**These are two separate problems, and the original write-up mushed them
+together.** (a) LLM-assisted crop solves the **crop-geometry** (spatial) problem —
+that part is still valid, now with a corrected coordinate. (b) The `--hold`
+freeze-recall gap is a **separate, unsolved, temporal** extraction problem — an R01
+`--detect freeze` flag limitation, not something the crop fix touches. The crop
+being right does not mean recall is fine; treat them as independent follow-ups.
+
+**Positive note: Sonnet is sufficient for the crop-measurement step.** The blind
+re-measurement above was done by a Sonnet agent and was *more* precise than the
+original (Opus) eyeball measurement. The LLM-assisted crop step can be delegated to
+a Sonnet subagent — cheaper, and at least as accurate here.
 
 So the same recording that returned `None` under `--crop auto` (motion heuristic)
-yields cleanly-cropped slides under an **LLM-measured** `--crop`. The field record is:
-**auto path 0/2 (correct safe declines); LLM-assisted path 1/1 (recording B verified)**.
-The layer change is the fix, and it's demonstrated, not asserted.
+yields cleanly-cropped slides under an LLM-measured `--crop` — that part of the
+field record stands: **auto path 0/2 (correct safe declines); LLM-assisted crop
+path 1/1 (recording B verified, coordinate since corrected)**. What's not yet
+solved is freeze-hold recall on mixed-length decks — call that a known open
+follow-up, not a solved problem.
 
 Companion to [`2026-06-27-demo-heavy-seminar-coverage.md`](2026-06-27-demo-heavy-seminar-coverage.md)
 (notes-coverage on recording A).
