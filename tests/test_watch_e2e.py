@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.watch import (
+    _emit_slide_review_lines,
     _scheme_ok,
     _slides_advisories,
     _validate_freeze_args,
@@ -213,3 +214,26 @@ def test_watch_slides_end_to_end_on_local_fixture(tmp_path):
     assert all(frame["path"].startswith("frames/") for frame in manifest["frames"])
     for frame in manifest["frames"]:
         assert (lib / frame["path"]).exists()
+
+
+def test_emit_slide_review_lines_prints_review_and_merged(capsys):
+    _emit_slide_review_lines(
+        flagged=[(63.0, 91.0, 8)],
+        merged=[(720.0, 733.0, 10, 1.0)],
+    )
+    out = capsys.readouterr().out
+    assert "review: near-dup t=01:03 ~ t=01:31 (dist 8)" in out
+    assert "merged: t=12:00 ~ t=12:13 (dist 10, gap 1.0s)" in out
+
+
+def test_emit_slide_review_lines_merged_only(capsys):
+    # A merge with no borderline-flag must STILL be reported — this is the R06
+    # transparency guarantee. Catches a regression that drops the merged loop or
+    # swaps flagged/merged.
+    _emit_slide_review_lines(flagged=[], merged=[(300.0, 305.0, 11, 5.0)])
+    assert capsys.readouterr().out == "merged: t=05:00 ~ t=05:05 (dist 11, gap 5.0s)\n"
+
+
+def test_emit_slide_review_lines_empty_is_silent(capsys):
+    _emit_slide_review_lines(flagged=[], merged=[])
+    assert capsys.readouterr().out == ""

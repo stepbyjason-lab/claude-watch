@@ -145,6 +145,27 @@ def _prefix_frame_paths(records: list[dict]) -> list[dict]:
     return [{**fr, "path": f"frames/{fr['path']}"} for fr in records]
 
 
+def _emit_slide_review_lines(
+    flagged: list[tuple[float, float, int]],
+    merged: list[tuple[float, float, int, float]],
+) -> None:
+    """Print the slides-mode audit lines: borderline-kept (`review:`) and folded-away
+    (`merged:`) pairs. Extracted from main() so this transparency output can be
+    unit-tested via capsys without driving the whole pipeline — a merge/dedup fold
+    that the user can't see in the manifest is a silent-recall regression.
+    """
+    for ta, tb, d in flagged:
+        print(
+            f"review: near-dup t={int(ta)//60:02d}:{int(ta)%60:02d} "
+            f"~ t={int(tb)//60:02d}:{int(tb)%60:02d} (dist {d})"
+        )
+    for ta, tb, d, gap in merged:
+        print(
+            f"merged: t={int(ta)//60:02d}:{int(ta)%60:02d} "
+            f"~ t={int(tb)//60:02d}:{int(tb)%60:02d} (dist {d}, gap {gap:.1f}s)"
+        )
+
+
 def select_scenes(video, meta, args, focus, work, *, cached):
     """Mode-dispatched detect + extract step.
 
@@ -476,16 +497,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{fr['index']:04d}  t={mm:02d}:{ss:02d}  {fr['path']}  ({fr['kind']})")
     if args.slides:
         print(f"slides_extracted: {len(frame_records)}")
-        for ta, tb, d in flagged:
-            print(
-                f"review: near-dup t={int(ta)//60:02d}:{int(ta)%60:02d} "
-                f"~ t={int(tb)//60:02d}:{int(tb)%60:02d} (dist {d})"
-            )
-        for ta, tb, d, gap in merged:
-            print(
-                f"merged: t={int(ta)//60:02d}:{int(ta)%60:02d} "
-                f"~ t={int(tb)//60:02d}:{int(tb)%60:02d} (dist {d}, gap {gap:.1f}s)"
-            )
+        _emit_slide_review_lines(flagged, merged)
     print()
     print("=== transcript ===")
     print(f"{work / transcript_consumer_path}  (load this — too long to inline)")
