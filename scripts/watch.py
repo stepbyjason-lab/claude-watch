@@ -201,16 +201,24 @@ def _prefix_frame_paths(records: list[dict]) -> list[dict]:
 def _emit_slide_review_lines(
     flagged: list[tuple[float, float, int]],
     merged: list[tuple[float, float, int, float]],
+    merge_flagged: list[tuple[float, float, int, float]],
 ) -> None:
-    """Print the slides-mode audit lines: borderline-kept (`review:`) and folded-away
-    (`merged:`) pairs. Extracted from main() so this transparency output can be
-    unit-tested via capsys without driving the whole pipeline — a merge/dedup fold
-    that the user can't see in the manifest is a silent-recall regression.
+    """Print the slides-mode audit lines: borderline-kept dedup pairs (`review:
+    near-dup`), preserved exact-threshold merge pairs (`review: merge-threshold`),
+    and folded-away merge pairs (`merged:`). Extracted from main() so this
+    transparency output can be unit-tested via capsys without driving the whole
+    pipeline — a merge/dedup fold that the user can't see in the manifest is a
+    silent-recall regression.
     """
     for ta, tb, d in flagged:
         print(
             f"review: near-dup t={int(ta)//60:02d}:{int(ta)%60:02d} "
             f"~ t={int(tb)//60:02d}:{int(tb)%60:02d} (dist {d})"
+        )
+    for ta, tb, d, gap in merge_flagged:
+        print(
+            f"review: merge-threshold t={int(ta)//60:02d}:{int(ta)%60:02d} "
+            f"~ t={int(tb)//60:02d}:{int(tb)%60:02d} (dist {d}, gap {gap:.1f}s)"
         )
     for ta, tb, d, gap in merged:
         print(
@@ -222,10 +230,10 @@ def _emit_slide_review_lines(
 def select_scenes(video, meta, args, focus, work, *, cached):
     """Mode-dispatched detect + extract step.
 
-    Returns (frame_records, scenes, flagged, merged), with frame paths relative to
-    the library directory and frame files already written. `merged` is only
-    populated in freeze-detect mode (the time-aware merge pass); scene mode and
-    classic mode always return an empty list for it.
+    Returns (frame_records, scenes, flagged, merged, merge_flagged), with frame paths
+    relative to the library directory and frame files already written. `merged` and
+    `merge_flagged` are only populated in freeze-detect mode (the time-aware merge
+    pass); scene mode and classic mode always return an empty list for both.
     """
     frames_dir = work / "frames"
 
@@ -264,7 +272,13 @@ def select_scenes(video, meta, args, focus, work, *, cached):
             )
         frame_records = _prefix_frame_paths(result["slides"])
         scenes = [{"t": fr["t"], "score": 1.0, "kind": fr["kind"]} for fr in result["slides"]]
-        return frame_records, scenes, result["flagged"], result.get("merged", [])
+        return (
+            frame_records,
+            scenes,
+            result["flagged"],
+            result.get("merged", []),
+            result.get("merge_flagged", []),
+        )
 
     scenes_path = work / "scenes.json"
     if cached and scenes_path.exists() and not focus:
@@ -304,7 +318,7 @@ def select_scenes(video, meta, args, focus, work, *, cached):
     )
     frame_records = _prefix_frame_paths(raw_frame_records)
     scenes = [{"t": s.t, "score": s.score, "kind": s.kind} for s in capped]
-    return frame_records, scenes, [], []
+    return frame_records, scenes, [], [], []
 
 
 def _emit_probe_frame_lines(
@@ -422,10 +436,12 @@ def main(argv: list[str] | None = None) -> int:
                         "this AND --merge-dist to match, so setting EITHER to 0 disables "
                         "the whole merge pass -> R05 behavior, not just this half of it)")
     p.add_argument("--merge-dist", type=int, default=11,
-                   help="slides freeze: max hash distance to merge as a build-step "
-                        "(freeze-only; merge requires BOTH this AND --merge-gap to match, "
-                        "so setting EITHER to 0 disables the whole merge pass -> R05 "
-                        "behavior, not just this half of it)")
+                   help="slides freeze: max hash distance to merge as a build-step -- "
+                        "strictly below this merges; exactly this is kept and flagged as "
+                        "`review: merge-threshold` instead of folded away (freeze-only; "
+                        "merge requires BOTH this AND --merge-gap to match, so setting "
+                        "EITHER to 0 disables the whole merge pass -> R05 behavior, not "
+                        "just this half of it)")
     p.add_argument("--probe-frame", action="store_true",
                    help="slides only: download the source, extract ONE native-resolution "
                         "frame + report its pixel dimensions, then exit (skips detect/"
@@ -570,7 +586,7 @@ def main(argv: list[str] | None = None) -> int:
     # would also swallow genuine ffmpeg/programming failures into a terse exit, hiding
     # bugs. Real extraction failures keep their traceback (a loud signal, not silent).
     try:
-        frame_records, scenes, flagged, merged = select_scenes(
+        frame_records, scenes, flagged, merged, merge_flagged = select_scenes(
             video, meta, args, focus, work, cached=cached
         )
     except slides_mod.CandidateCapExceeded as e:
@@ -621,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{fr['index']:04d}  t={mm:02d}:{ss:02d}  {fr['path']}  ({fr['kind']})")
     if args.slides:
         print(f"slides_extracted: {len(frame_records)}")
-        _emit_slide_review_lines(flagged, merged)
+        _emit_slide_review_lines(flagged, merged, merge_flagged)
     print()
     print("=== transcript ===")
     print(f"{work / transcript_consumer_path}  (load this — too long to inline)")

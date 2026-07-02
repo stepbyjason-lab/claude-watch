@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts import library as lib
+from scripts import scenes as scenes_mod
 from scripts import watch
 from scripts.watch import (
     _emit_probe_frame_lines,
@@ -481,6 +482,104 @@ def test_main_probe_frame_dispatch_never_reaches_detect_or_transcribe(
     assert "source_resolution: 320x240" in out
 
 
+def test_main_emits_slide_review_lines_with_correct_call_site_arg_order(
+    tmp_path, monkeypatch, capsys
+):
+    # R08 iter-1 P1: main()'s call `_emit_slide_review_lines(flagged, merged,
+    # merge_flagged)` at the Stage 7 print block must pass those three lists in
+    # that exact order. flagged/merged/merge_flagged carry DISTINGUISHABLE dist
+    # values (8 / 9 / 11) so that swapping the last two positional args at the
+    # call site prints "merged:" with dist 11 (should be 9) and "review:
+    # merge-threshold" with dist 9 (should be 11) — a mismatch this test catches.
+    monkeypatch.setattr(lib, "LIBRARY_ROOT", tmp_path)
+
+    fake_source = tmp_path / "source.mp4"
+    fake_source.write_bytes(b"fake-video")
+
+    fake_meta = {
+        "title": "Test video",
+        "duration_s": 10.0,
+        "source": str(fake_source),
+        "is_url": False,
+        "source_hash": "deadbeef",
+        "focus_range_str": "",
+    }
+    monkeypatch.setattr(
+        watch.resolve_mod, "resolve_source", lambda *a, **kw: dict(fake_meta)
+    )
+
+    def fake_copy_local(src, out_dir, *, basename="video"):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dest = out_dir / f"{basename}.mp4"
+        dest.write_bytes(b"fake-video")
+        return dest
+
+    monkeypatch.setattr(watch.download_mod, "copy_local", fake_copy_local)
+
+    def fake_detect_slides_freeze(video, *, out_dir, **kwargs):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "0001_t00-03.jpg").write_bytes(b"fake-jpg")
+        return {
+            "slides": [{"index": 1, "t": 3.0, "path": "0001_t00-03.jpg", "kind": "detected"}],
+            "flagged": [(10.0, 20.0, 8)],
+            "merged": [(100.0, 105.0, 9, 5.0)],
+            "merge_flagged": [(200.0, 205.0, 11, 5.0)],
+        }
+
+    monkeypatch.setattr(watch.slides_mod, "detect_slides_freeze", fake_detect_slides_freeze)
+
+    rc = watch.main([
+        str(fake_source), "--slides", "--no-whisper", "--out-dir", str(tmp_path),
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "review: near-dup t=00:10 ~ t=00:20 (dist 8)" in out
+    assert "merged: t=01:40 ~ t=01:45 (dist 9, gap 5.0s)" in out
+    assert "review: merge-threshold t=03:20 ~ t=03:25 (dist 11, gap 5.0s)" in out
+
+
+def test_select_scenes_classic_mode_returns_five_tuple_with_empty_slide_lists(
+    tmp_path, monkeypatch
+):
+    # R08 iter-1 P1: classic (non-slides) mode's `select_scenes` return statement
+    # `return frame_records, scenes, [], [], []` must stay a 5-tuple with the
+    # slides-only positions (flagged, merged, merge_flagged) all empty. A mutant
+    # that drops the trailing `[]` (making it a 4-tuple) fails the unpack below.
+    monkeypatch.setattr(lib, "LIBRARY_ROOT", tmp_path)
+
+    fake_scene = scenes_mod.Scene(t=0.0, score=1.0, kind="detected")
+    monkeypatch.setattr(watch.scenes_mod, "detect_scenes", lambda video, **kw: [fake_scene])
+
+    def fake_extract_frames(video, scenes, *, out_dir, width_px=512, **kwargs):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "0001_t00-00.jpg").write_bytes(b"fake-jpg")
+        return [{"index": 1, "t": 0.0, "path": "0001_t00-00.jpg", "kind": "detected"}]
+
+    monkeypatch.setattr(watch.frames_mod, "extract_frames", fake_extract_frames)
+
+    args = argparse.Namespace(
+        slides=False,
+        scene_threshold=0.30,
+        max_gap=45.0,
+        max_frames=80,
+        resolution=512,
+    )
+    meta = {"duration_s": 10.0}
+    work = tmp_path / "slug"
+    work.mkdir(parents=True, exist_ok=True)
+
+    result = watch.select_scenes(Path("fake.mp4"), meta, args, None, work, cached=False)
+
+    assert len(result) == 5
+    frame_records, scenes, flagged, merged, merge_flagged = result
+    assert flagged == []
+    assert merged == []
+    assert merge_flagged == []
+    assert [fr["path"] for fr in frame_records] == ["frames/0001_t00-00.jpg"]
+    assert [s["kind"] for s in scenes] == ["detected"]
+
+
 @pytest.mark.integration
 def test_watch_end_to_end_on_local_fixture(tmp_path):
     """`scripts/watch.py <fixture> --no-whisper --out-dir <tmp>` runs the full pipeline."""
@@ -587,6 +686,7 @@ def test_emit_slide_review_lines_prints_review_and_merged(capsys):
     _emit_slide_review_lines(
         flagged=[(63.0, 91.0, 8)],
         merged=[(720.0, 733.0, 10, 1.0)],
+        merge_flagged=[],
     )
     out = capsys.readouterr().out
     assert "review: near-dup t=01:03 ~ t=01:31 (dist 8)" in out
@@ -597,10 +697,136 @@ def test_emit_slide_review_lines_merged_only(capsys):
     # A merge with no borderline-flag must STILL be reported — this is the R06
     # transparency guarantee. Catches a regression that drops the merged loop or
     # swaps flagged/merged.
-    _emit_slide_review_lines(flagged=[], merged=[(300.0, 305.0, 11, 5.0)])
+    _emit_slide_review_lines(flagged=[], merged=[(300.0, 305.0, 11, 5.0)], merge_flagged=[])
     assert capsys.readouterr().out == "merged: t=05:00 ~ t=05:05 (dist 11, gap 5.0s)\n"
 
 
 def test_emit_slide_review_lines_empty_is_silent(capsys):
-    _emit_slide_review_lines(flagged=[], merged=[])
+    _emit_slide_review_lines(flagged=[], merged=[], merge_flagged=[])
     assert capsys.readouterr().out == ""
+
+
+def test_emit_slide_review_lines_merge_threshold_exact_format(capsys):
+    # R08: pin the exact `review: merge-threshold` line format — dist is printed
+    # bare (it's definitionally == merge_dist), gap keeps the same "%.1f" style as
+    # the `merged:` line.
+    _emit_slide_review_lines(
+        flagged=[], merged=[], merge_flagged=[(300.0, 305.1, 11, 5.1)],
+    )
+    assert (
+        capsys.readouterr().out
+        == "review: merge-threshold t=05:00 ~ t=05:05 (dist 11, gap 5.1s)\n"
+    )
+
+
+def test_emit_slide_review_lines_all_three_kinds_order(capsys):
+    # Output order: near-dup lines first, then merge-threshold lines, then merged:
+    # lines — a fixed reading order regardless of which lists are non-empty.
+    _emit_slide_review_lines(
+        flagged=[(63.0, 91.0, 8)],
+        merged=[(720.0, 733.0, 10, 1.0)],
+        merge_flagged=[(300.0, 305.0, 11, 5.0)],
+    )
+    out = capsys.readouterr().out
+    near_dup_idx = out.index("review: near-dup")
+    merge_threshold_idx = out.index("review: merge-threshold")
+    merged_idx = out.index("merged:")
+    assert near_dup_idx < merge_threshold_idx < merged_idx
+
+
+def test_emit_slide_review_lines_merge_flagged_only(capsys):
+    # A threshold-preserved pair with no near-dup/merged pairs must STILL be
+    # reported — same R06/R08 transparency guarantee as merged-only: the caller
+    # can't infer a preserved pair from the manifest alone.
+    _emit_slide_review_lines(flagged=[], merged=[], merge_flagged=[(100.0, 105.0, 11, 5.0)])
+    assert (
+        capsys.readouterr().out
+        == "review: merge-threshold t=01:40 ~ t=01:45 (dist 11, gap 5.0s)\n"
+    )
+
+
+def test_select_scenes_wires_merge_flagged_from_detect_result(tmp_path, monkeypatch):
+    # R08 wiring proof (R07 lesson: unverified wiring is a P1). detect_slides_freeze
+    # is monkeypatched to return a result dict carrying merge_flagged pairs;
+    # select_scenes must pass that list through unchanged as its 5th return element,
+    # not drop it or swap it with merged.
+    monkeypatch.setattr(lib, "LIBRARY_ROOT", tmp_path)
+
+    fake_merge_flagged = [(100.0, 105.0, 11, 5.0)]
+    fake_record = {"index": 1, "t": 100.0, "path": "0001.jpg", "kind": "freeze"}
+
+    def fake_detect_slides_freeze(video, *, out_dir, **kwargs):
+        return {
+            "slides": [fake_record],
+            "flagged": [],
+            "merged": [],
+            "merge_flagged": fake_merge_flagged,
+        }
+
+    monkeypatch.setattr(watch.slides_mod, "detect_slides_freeze", fake_detect_slides_freeze)
+
+    args = argparse.Namespace(
+        slides=True,
+        detect="freeze",
+        cam_corner=None,
+        caption=None,
+        crop=None,
+        hold=3.0,
+        freeze_noise="-60dB",
+        phash_dist=4,
+        candidate_cap=800,
+        prefer_light=False,
+        light_threshold=200,
+        merge_gap=15.0,
+        merge_dist=11,
+    )
+
+    work = tmp_path / "slug"
+    work.mkdir(parents=True, exist_ok=True)
+
+    frame_records, scenes, flagged, merged, merge_flagged = watch.select_scenes(
+        Path("fake.mp4"), {}, args, None, work, cached=False,
+    )
+
+    assert merge_flagged == fake_merge_flagged
+    assert merged == []
+    assert flagged == []
+    assert [fr["path"] for fr in frame_records] == ["frames/0001.jpg"]
+
+
+def test_select_scenes_scene_mode_defaults_merge_lists_to_empty(tmp_path, monkeypatch):
+    # Scene-mode detect_slides legitimately returns a dict WITHOUT "merged"/
+    # "merge_flagged" keys — select_scenes must degrade both to [] via .get()
+    # defaults. Exercising the .get() default path pins the key spelling: a
+    # typo'd key name (e.g. result.get("merged_flagged", [])) would pass every
+    # freeze-mode test (those dicts always carry the key) but fail here.
+    monkeypatch.setattr(lib, "LIBRARY_ROOT", tmp_path)
+
+    fake_record = {"index": 1, "t": 100.0, "path": "0001.jpg", "kind": "detected"}
+
+    def fake_detect_slides(video, *, out_dir, **kwargs):
+        return {"slides": [fake_record], "flagged": []}
+
+    monkeypatch.setattr(watch.slides_mod, "detect_slides", fake_detect_slides)
+
+    args = argparse.Namespace(
+        slides=True,
+        detect="scene",
+        cam_corner=None,
+        caption=None,
+        scene_threshold=0.30,
+        max_gap=45.0,
+        phash_dist=4,
+        candidate_cap=800,
+    )
+
+    work = tmp_path / "slug"
+    work.mkdir(parents=True, exist_ok=True)
+
+    result = watch.select_scenes(Path("fake.mp4"), {}, args, None, work, cached=False)
+
+    assert len(result) == 5
+    frame_records, scenes, flagged, merged, merge_flagged = result
+    assert merged == []
+    assert merge_flagged == []
+    assert [fr["path"] for fr in frame_records] == ["frames/0001.jpg"]

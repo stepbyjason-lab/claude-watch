@@ -183,21 +183,43 @@ def time_aware_merge(
     merge_dist: int = 11,
     hash_fn: Callable[[str | Path, str], int] = dhash,
     hash_cache: dict[str, int] | None = None,
-) -> tuple[list[dict], list[tuple[float, float, int, float]]]:
+) -> tuple[list[dict], list[tuple[float, float, int, float]], list[tuple[float, float, int, float]]]:
     """Freeze-only post-pass. Drop a frame into the previous KEPT frame iff it is BOTH
-    close in time (gap < merge_gap_s) AND close in hash (dist <= merge_dist) — an
-    animation/scroll build-step of the same screen, not a genuine re-show or new slide.
-    Compares only to the last KEPT frame (same structure as phash_dedup) — a merged
-    (dropped) frame never becomes the comparison anchor for the next frame, so a chain
-    of small build-steps all collapse toward the first frame of the chain instead of
-    drifting away one small step at a time.
+    close in time (gap < merge_gap_s) AND *strictly* close in hash (dist < merge_dist)
+    — an animation/scroll build-step of the same screen, not a genuine re-show or new
+    slide. Compares only to the last KEPT frame (same structure as phash_dedup) — a
+    merged (dropped) frame never becomes the comparison anchor for the next frame, so
+    a chain of small build-steps all collapse toward the first frame of the chain
+    instead of drifting away one small step at a time.
 
-    Returns `(kept, merged)`. `merged` records what got folded away, as
-    `(prev_kept_t, dropped_t, dist, gap)` tuples, so a caller can surface it to the
-    user the same way `phash_dedup` surfaces its `flagged` borderline pairs — this
-    pass is otherwise a silent drop, and its default `merge_dist` (11) is looser than
-    `phash_dedup`'s `flag_dist` (10), so a genuinely distinct slide can be folded away
-    with no visible trace unless the caller prints `merged`.
+    The decision band is split three ways when gap < merge_gap_s:
+    - `dist < merge_dist` -> merge (fold into the previous kept frame).
+    - `dist == merge_dist` -> KEEP, but flag it (`threshold_flagged`). A pair landing
+      *exactly* on the threshold is the most fragile call this pass makes — one
+      hamming-distance unit separates "same build step" from "different slide", and a
+      few pixels of crop drift is enough to flip it. Field evidence: a ~6px crop
+      change (two independently-measured, both-correct crops of the same recording)
+      moved one real pair from dist 12 (kept under the wider crop) to dist 11 (folded
+      under the narrower crop, exactly at the default `merge_dist`), losing a genuine
+      prepared slide (see `docs/dogfood/2026-06-28-auto-crop-field-limits.md`,
+      "2026-07-02 follow-up"). Slide loss can't be recovered downstream, but an
+      over-kept pair costs nothing the notes step can't fold back with a `ledger`
+      disposition — so exact-threshold pairs are now preserved and surfaced instead
+      of silently dropped.
+    - `dist > merge_dist` -> keep, no flag (clearly a different slide).
+    `gap >= merge_gap_s` always keeps (with no flag), regardless of distance — a
+    deliberate re-show is not a build-step no matter how close the hashes are.
+
+    A threshold-kept frame is itself a KEPT frame, so it becomes the new last-kept
+    anchor for the next comparison, same as any other kept frame — no special case.
+
+    Returns `(kept, merged, threshold_flagged)`. `merged` records what got folded
+    away, as `(prev_kept_t, dropped_t, dist, gap)` tuples, so a caller can surface it
+    to the user the same way `phash_dedup` surfaces its `flagged` borderline pairs.
+    `threshold_flagged` records the preserved exact-threshold pairs in the same
+    `(prev_kept_t, t, dist, gap)` shape, so a caller can surface those too — read both
+    frames of a flagged pair; fold it in the notes step only if it really is the same
+    screen's build/scroll state.
 
     `hash_cache` (optional) is a `{path: hash}` map of already-computed hashes (e.g.
     from `phash_dedup`, which uses the same `hash_fn`/`crop_vf` at the freeze call
@@ -207,6 +229,7 @@ def time_aware_merge(
     """
     kept: list[dict] = []
     merged: list[tuple[float, float, int, float]] = []
+    threshold_flagged: list[tuple[float, float, int, float]] = []
     last_hash: int | None = None
     last_t: float | None = None
 
@@ -226,15 +249,17 @@ def time_aware_merge(
         gap = rec["t"] - last_t
         current_hash = _hash(rec)
         distance = hamming(current_hash, last_hash)
-        if gap < merge_gap_s and distance <= merge_dist:
+        if gap < merge_gap_s and distance < merge_dist:
             merged.append((last_t, rec["t"], distance, gap))
             continue
 
         kept.append(rec)
+        if gap < merge_gap_s and distance == merge_dist:
+            threshold_flagged.append((last_t, rec["t"], distance, gap))
         last_hash = current_hash
         last_t = rec["t"]
 
-    return kept, merged
+    return kept, merged, threshold_flagged
 
 
 def probe_dimensions(video: Path) -> tuple[int, int]:
@@ -684,15 +709,18 @@ def detect_slides_freeze(
     demo screens. Assumes light-background slides; leave off for dark-themed decks.
 
     After dedup, `time_aware_merge` collapses animation/scroll build-steps that are
-    both close in time (< `merge_gap_s`) and close in hash (<= `merge_dist`) into the
-    preceding kept frame. Pass `merge_gap_s <= 0` or `merge_dist <= 0` to disable this
-    pass entirely and restore byte-identical pre-merge (R05) behavior.
+    both close in time (< `merge_gap_s`) and strictly close in hash (< `merge_dist`)
+    into the preceding kept frame. A pair landing *exactly* on `merge_dist` is the
+    most fragile call this pass makes (one hamming-distance unit from either
+    decision) — instead of merging it, that frame is kept and the pair is recorded so
+    the caller can surface it for review; see `time_aware_merge`'s docstring for the
+    field evidence behind this. Pass `merge_gap_s <= 0` or `merge_dist <= 0` to
+    disable this pass entirely and restore byte-identical pre-merge (R05) behavior.
 
     The merged pairs are returned as `result["merged"]` (mirroring `result["flagged"]`
-    from `phash_dedup`) so a caller can surface exactly what got folded away — this
-    pass is otherwise a silent drop, and its default `merge_dist` (11) is looser than
-    `flag_dist` (10), so a genuinely distinct slide shown within `merge_gap_s` could
-    vanish with no visible trace if the caller doesn't print `merged`.
+    from `phash_dedup`) so a caller can surface exactly what got folded away. The
+    preserved exact-threshold pairs are returned as `result["merge_flagged"]` (empty
+    when the pass is disabled), in the same `(prev_kept_t, t, dist, gap)` shape.
     """
     if crop == "auto":
         vw, vh = probe_dimensions(video)
@@ -750,8 +778,9 @@ def detect_slides_freeze(
         # merge_gap_s/merge_dist <= 0 disables the pass entirely, restoring R05
         # byte-identical behavior.
         merged: list[tuple[float, float, int, float]] = []
+        merge_flagged: list[tuple[float, float, int, float]] = []
         if merge_gap_s > 0 and merge_dist > 0:
-            kept, merged = time_aware_merge(
+            kept, merged, merge_flagged = time_aware_merge(
                 kept, crop_vf="", merge_gap_s=merge_gap_s, merge_dist=merge_dist,
                 hash_cache=hash_cache,
             )
@@ -802,4 +831,9 @@ def detect_slides_freeze(
             )
         slides = bright
 
-    return {"slides": slides, "flagged": flagged, "merged": merged}
+    return {
+        "slides": slides,
+        "flagged": flagged,
+        "merged": merged,
+        "merge_flagged": merge_flagged,
+    }

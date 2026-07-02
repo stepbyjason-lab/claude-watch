@@ -541,100 +541,131 @@ def test_detect_slides_freeze_prefer_light_failopen_on_luma_error(tmp_path, recw
     assert any("mean_luma failed" in str(w.message) for w in recwarn.list)
 
 
-# ---- time-aware merge (R06 --hold recall fix) --------------------------------
+# ---- time-aware merge (R06 --hold recall fix; R08 threshold preserve+flag) ---
 
 def _trecs(ts):
     return [{"index": i + 1, "t": float(t), "path": f"/tmp/m{i}.jpg"} for i, t in enumerate(ts)]
 
 
 def test_time_aware_merge_drops_when_gap_and_dist_both_close():
-    # gap=10 < 15, dist=3 <= 11 -> merge (animation build-step)
+    # gap=10 < 15, dist=3 < 11 -> merge (animation build-step)
     recs = _trecs([0, 10])
     hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=lambda p, c: hashes[p])
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
     assert [r["t"] for r in kept] == [0.0]
     assert merged == [(0.0, 10.0, 3, 10.0)]
+    assert threshold_flagged == []
 
 
 def test_time_aware_merge_keeps_when_time_far():
-    # gap=20 >= 15 (time far) even though dist=3 <= 11 -> keep (genuine re-show/new slide)
+    # gap=20 >= 15 (time far) even though dist=3 < 11 -> keep (genuine re-show/new slide)
     recs = _trecs([0, 20])
     hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=lambda p, c: hashes[p])
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
     assert [r["t"] for r in kept] == [0.0, 20.0]
     assert merged == []
+    assert threshold_flagged == []
 
 
 def test_time_aware_merge_keeps_when_dist_far():
-    # gap=5 < 15 (time close) but dist=64 (hash far) -> keep (a different slide)
+    # gap=5 < 15 (time close) but dist=64 (hash far) -> keep, no flag (a different slide)
     recs = _trecs([0, 5])
     hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0xFFFFFFFFFFFFFFFF}
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=lambda p, c: hashes[p])
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
     assert [r["t"] for r in kept] == [0.0, 5.0]
     assert merged == []
+    assert threshold_flagged == []
 
 
 def test_time_aware_merge_boundary_gap_equal_threshold_is_not_merged():
-    # gap == merge_gap_s: rule is gap < merge_gap_s (strict), so gap==15 does NOT merge.
+    # gap == merge_gap_s: rule is gap < merge_gap_s (strict), so gap==15 does NOT merge
+    # and is NOT flagged, dist notwithstanding.
     recs = _trecs([0, 15])
     hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=lambda p, c: hashes[p])
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
     assert [r["t"] for r in kept] == [0.0, 15.0]
     assert merged == []
+    assert threshold_flagged == []
 
 
-def test_time_aware_merge_boundary_dist_equal_threshold_is_merged():
-    # dist == merge_dist: rule is dist <= merge_dist (inclusive), so dist==11 DOES merge.
+def test_time_aware_merge_boundary_dist_equal_threshold_is_flagged_not_merged():
+    # R08: dist == merge_dist no longer merges — it's KEPT and recorded in
+    # threshold_flagged (the exact-threshold call is the most fragile one; see
+    # docstring). Rule is dist < merge_dist (strict) to merge.
     recs = _trecs([0, 10])
     hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0b111_1111_1111}  # 11 bits set -> dist 11
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=lambda p, c: hashes[p])
-    assert [r["t"] for r in kept] == [0.0]
-    assert merged == [(0.0, 10.0, 11, 10.0)]
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+    assert [r["t"] for r in kept] == [0.0, 10.0]
+    assert merged == []
+    assert threshold_flagged == [(0.0, 10.0, 11, 10.0)]
 
 
 def test_time_aware_merge_disabled_when_merge_gap_zero():
     recs = _trecs([0, 1, 2])
     hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0, "/tmp/m2.jpg": 0}
-    kept, merged = time_aware_merge(recs, merge_gap_s=0, merge_dist=11,
-                                     hash_fn=lambda p, c: hashes[p])
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
     assert kept == recs
     assert merged == []
+    assert threshold_flagged == []
 
 
 def test_time_aware_merge_at_dist_zero_only_merges_identical_hashes():
     # time_aware_merge itself has no special-case for merge_dist=0 — the disable-on-0
-    # gate lives in the caller (detect_slides_freeze). At the function level, dist<=0
-    # simply means "only bit-identical frames merge" — verify that raw rule directly.
+    # gate lives in the caller (detect_slides_freeze). At the function level, dist<0
+    # (i.e. dist==0, since hamming distance can't be negative) simply means "only
+    # bit-identical frames merge" — verify that raw rule directly. dist==0==merge_dist
+    # is itself the exact-threshold case, so m1 is flagged (not merged); m2 (dist 1,
+    # compared against the threshold-kept m1) is a clean keep, no flag.
     recs = _trecs([0, 1, 2])
     hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0, "/tmp/m2.jpg": 0b1}
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=0,
-                                     hash_fn=lambda p, c: hashes[p])
-    # m1 (dist 0 from m0) merges; m2 (dist 1 from last-kept m0) is kept.
-    assert [r["t"] for r in kept] == [0.0, 2.0]
-    assert merged == [(0.0, 1.0, 0, 1.0)]
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=0, hash_fn=lambda p, c: hashes[p])
+    assert [r["t"] for r in kept] == [0.0, 1.0, 2.0]
+    assert merged == []
+    assert threshold_flagged == [(0.0, 1.0, 0, 1.0)]
 
 
 def test_time_aware_merge_empty_input():
-    kept, merged = time_aware_merge([], merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
+    kept, merged, threshold_flagged = time_aware_merge(
+        [], merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
     assert kept == []
     assert merged == []
+    assert threshold_flagged == []
 
 
 def test_time_aware_merge_single_record():
     recs = _trecs([0])
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
     assert kept == recs
     assert merged == []
+    assert threshold_flagged == []
+
+
+def test_time_aware_merge_returns_3_tuple_shape():
+    # Pin the return arity — R06 shipped a call-site arity swap that unit tests
+    # didn't catch (2-tuple -> 2-tuple went unnoticed because both were 2-tuples).
+    # R08 changes 2-tuple -> 3-tuple; pin it explicitly so a future signature drift
+    # is caught here, not just at the (also-updated) detect_slides_freeze call site.
+    result = time_aware_merge(_trecs([0]), merge_gap_s=15.0, merge_dist=11,
+                               hash_fn=lambda p, c: 0)
+    assert isinstance(result, tuple)
+    assert len(result) == 3
+    kept, merged, threshold_flagged = result
+    assert isinstance(kept, list)
+    assert isinstance(merged, list)
+    assert isinstance(threshold_flagged, list)
 
 
 def test_time_aware_merge_chains_through_multiple_builds():
-    # 3-frame animation build (each close to the previous) all collapse to the first;
-    # a 4th frame far in time is kept separately.
+    # 3-frame animation build (each strictly closer than merge_dist to the previous)
+    # all collapse to the first; a 4th frame far in time is kept separately.
     recs = _trecs([0, 5, 9, 100])
     hashes = {
         "/tmp/m0.jpg": 0b000,
@@ -642,30 +673,70 @@ def test_time_aware_merge_chains_through_multiple_builds():
         "/tmp/m2.jpg": 0b011,
         "/tmp/m3.jpg": 0b011,
     }
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=lambda p, c: hashes[p])
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
     assert [r["t"] for r in kept] == [0.0, 100.0]
     # each merged-in frame is recorded against the last KEPT frame (t=0), not the
     # previous frame in the chain (last-seen) — see test_time_aware_merge_compares_to_last_kept.
     assert merged == [(0.0, 5.0, 1, 5.0), (0.0, 9.0, 2, 9.0)]
+    assert threshold_flagged == []
 
 
 def test_time_aware_merge_compares_to_last_kept_not_last_seen():
     # 3-frame chain: frame1 (dist 1 from frame0) merges into frame0. frame2 must then
     # be compared against frame0 (the last KEPT frame), NOT frame1 (merged/last-seen).
-    # hash0=0b0000, hash1=0b0001 (dist 1 from hash0 -> merges).
+    # hash0=0b0000, hash1=0b0001 (dist 1 from hash0 -> merges, dist < 11).
     # hash2 is chosen so hamming(hash2, hash0) > 11 (far from last-KEPT -> must be kept)
-    # but hamming(hash2, hash1) <= 11 (close to last-SEEN -> would wrongly merge if the
+    # but hamming(hash2, hash1) < 11 (close to last-SEEN -> would wrongly merge if the
     # loop tracked last-seen instead of last-kept).
     # hash0 = 0, hash1 = 0b1, hash2 = 0xFFF (12 bits set).
     #   hamming(hash2, hash0) = 12 (> 11 -> keep if compared to last-KEPT, correct)
-    #   hamming(hash2, hash1) = 11 (<= 11 -> would merge if compared to last-SEEN, wrong)
+    #   hamming(hash2, hash1) = 11 (< 12, close to last-SEEN -> would merge if wrongly
+    #     anchored there)
     recs = _trecs([0, 10, 19])  # all gaps (10, 9) < 15 so time never gates this test
     hashes = {"/tmp/m0.jpg": 0b0, "/tmp/m1.jpg": 0b1, "/tmp/m2.jpg": 0xFFF}
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=lambda p, c: hashes[p])
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
     assert [r["t"] for r in kept] == [0.0, 19.0]
     assert merged == [(0.0, 10.0, 1, 10.0)]
+    assert threshold_flagged == []
+
+
+def test_time_aware_merge_threshold_keep_promotes_new_anchor():
+    # Anchor-promotion proof (R08): A, B, C where B lands EXACTLY at merge_dist from
+    # A (threshold-kept, becomes the new anchor), and C is close enough to merge into
+    # B but is NOT close enough to have merged into A directly — proving the anchor
+    # used for C's comparison is the threshold-kept B, not the original A.
+    # hashA = 0, hashB = 0b111_1111_1111 (11 bits set -> dist(B,A) = 11 == merge_dist
+    #   -> B is threshold-kept, not merged, and becomes the new anchor).
+    # hashC = 0b011_1111_1111 (10 bits set, a strict subset of B's bits):
+    #   dist(C, B) = 1  (< 11 -> merges into B, the anchor)
+    #   dist(C, A) = 10 (< 11 -> would ALSO have merged into A directly, which doesn't
+    #     distinguish the anchor — so this alone isn't proof).
+    # To make the anchor unambiguous, use a hashC that is close to B but far from A:
+    # hashC = 0b111_1111_1110 (10 bits set, differs from B only in the lowest bit):
+    #   dist(C, B) = 1  (< 11 -> merges into B)
+    #   dist(C, A) = 10 (< 11 too -- still ambiguous with a pure-subset hash)
+    # A hamming distance can't discriminate "close to B, far from A" while B itself
+    # is close to A (dist(A,B)=11) without violating the triangle inequality bound
+    # dist(C,A) <= dist(C,B) + dist(B,A). Instead, prove anchor promotion via TIME:
+    # if C were compared against A, gap(C, tA) would be used; if compared against B
+    # (the promoted anchor), gap(C, tB) is used. Choose times so gap(C, tA) >=
+    # merge_gap_s (would keep, no merge, if wrongly anchored at A) but
+    # gap(C, tB) < merge_gap_s (merges if correctly anchored at the threshold-kept B).
+    recs = _trecs([0, 10, 24])  # tA=0, tB=10, tC=24: gap(C,A)=24 (>=15), gap(C,B)=14 (<15)
+    hashes = {
+        "/tmp/m0.jpg": 0,                     # A
+        "/tmp/m1.jpg": 0b111_1111_1111,       # B: dist(B,A)=11 == merge_dist -> threshold-kept
+        "/tmp/m2.jpg": 0b111_1111_1110,       # C: dist(C,B)=1 (merges into B if B is anchor)
+    }
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+    # If anchored at A: gap(C,A)=24 >= 15 -> C kept, no merge. That's NOT what we assert —
+    # we assert C merges into B, proving the anchor promoted to B (the threshold-kept frame).
+    assert [r["t"] for r in kept] == [0.0, 10.0]
+    assert threshold_flagged == [(0.0, 10.0, 11, 10.0)]
+    assert merged == [(10.0, 24.0, 1, 14.0)]
 
 
 def test_time_aware_merge_consults_hash_cache_before_hash_fn():
@@ -678,11 +749,12 @@ def test_time_aware_merge_consults_hash_cache_before_hash_fn():
     def hash_fn_must_not_be_called(p, c):
         raise AssertionError(f"hash_fn should not be called for cached path {p}")
 
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=hash_fn_must_not_be_called,
-                                     hash_cache=cache)
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=hash_fn_must_not_be_called,
+        hash_cache=cache)
     assert [r["t"] for r in kept] == [0.0]
     assert merged == [(0.0, 10.0, 3, 10.0)]
+    assert threshold_flagged == []
 
 
 def test_time_aware_merge_falls_back_to_hash_fn_when_not_in_cache():
@@ -691,8 +763,8 @@ def test_time_aware_merge_falls_back_to_hash_fn_when_not_in_cache():
     recs = _trecs([0, 10])
     hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
     cache: dict[str, int] = {}  # empty — nothing precomputed
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=lambda p, c: hashes[p], hash_cache=cache)
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], hash_cache=cache)
     assert [r["t"] for r in kept] == [0.0]
 
 
@@ -701,10 +773,11 @@ def test_time_aware_merge_large_gap_same_hash_is_reshow_not_merge():
     # same slide, not an animation build-step. Proves the gap gate applies even when
     # the hash matches exactly (dist=0, the closest possible hash distance).
     recs = _trecs([0, 20])
-    kept, merged = time_aware_merge(recs, merge_gap_s=15.0, merge_dist=11,
-                                     hash_fn=lambda p, c: 0)
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
     assert [r["t"] for r in kept] == [0.0, 20.0]
     assert merged == []
+    assert threshold_flagged == []
 
 
 def test_detect_slides_freeze_merge_gap_zero_skips_merge_pass(tmp_path):
@@ -744,6 +817,7 @@ def test_detect_slides_freeze_merge_gap_zero_skips_merge_pass(tmp_path):
     remaining = {p.name for p in tmp_path.glob("*.jpg")}
     kept_names = {Path(s["path"]).name for s in out["slides"]}
     assert remaining == kept_names
+    assert out["merge_flagged"] == []
 
 
 def test_detect_slides_freeze_merge_dist_zero_also_skips_merge_pass(tmp_path):
@@ -779,6 +853,7 @@ def test_detect_slides_freeze_merge_dist_zero_also_skips_merge_pass(tmp_path):
             merge_gap_s=15.0, merge_dist=0,
         )
     assert len(out["slides"]) == 2
+    assert out["merge_flagged"] == []
 
 
 def _dhash_bits_to_gray_bytes(bits64: int) -> bytes:
@@ -806,7 +881,7 @@ def test_detect_slides_freeze_real_merge_end_to_end(tmp_path):
     # module-level name wouldn't be seen by it). 3 held periods: frame1/frame2 are
     # distinct enough to both survive phash_dedup (dist 12 > flag_dist 10), but
     # frame2/frame3 are close enough in both time and hash to merge (gap=1<15,
-    # dist=10<=11).
+    # dist=10<11).
     periods = [(1.0, 4.0), (10.0, 4.0), (11.0, 4.0)]
 
     def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
@@ -834,13 +909,14 @@ def test_detect_slides_freeze_real_merge_end_to_end(tmp_path):
         )
     # scene t = period start + min(dur/2, 3.0): starts 1/10/11 (dur 4) -> t 3/12/13.
     # frame1 (t=3) and frame2 (t=12) both survive phash_dedup (dist 12 > flag_dist 10);
-    # time_aware_merge then folds frame3 (t=13) into frame2 (gap=1<15, dist=10<=11).
+    # time_aware_merge then folds frame3 (t=13) into frame2 (gap=1<15, dist=10<11).
     assert [s["t"] for s in out["slides"]] == [3.0, 12.0]
     assert [s["index"] for s in out["slides"]] == [1, 2]  # reindexed 1..N
     remaining = {p.name for p in tmp_path.glob("*.jpg")}
     kept_names = {Path(s["path"]).name for s in out["slides"]}
     assert remaining == kept_names  # the merged-out frame's file was unlinked
     assert out["merged"] == [(12.0, 13.0, 10, 1.0)]
+    assert out["merge_flagged"] == []
 
 
 def test_detect_slides_freeze_applies_merge_and_unlinks_reindexes(tmp_path):
@@ -864,7 +940,7 @@ def test_detect_slides_freeze_applies_merge_and_unlinks_reindexes(tmp_path):
          patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
          patch("scripts.slides.time_aware_merge",
-               side_effect=lambda recs, **k: (recs[:2], fake_merged)):
+               side_effect=lambda recs, **k: (recs[:2], fake_merged, [])):
         out = detect_slides_freeze(
             Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
             hold=4.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
@@ -872,10 +948,43 @@ def test_detect_slides_freeze_applies_merge_and_unlinks_reindexes(tmp_path):
         )
     assert len(out["slides"]) == 2
     assert [s["index"] for s in out["slides"]] == [1, 2]  # reindexed
+    assert out["merge_flagged"] == []
     remaining = {p.name for p in tmp_path.glob("*.jpg")}
     kept_names = {Path(s["path"]).name for s in out["slides"]}
     assert remaining == kept_names  # the merged-out frame's file was unlinked
     assert out["merged"] == fake_merged  # merged pairs surfaced on the result dict
+
+
+def test_detect_slides_freeze_surfaces_merge_flagged_on_result_dict(tmp_path):
+    # R08 wiring: threshold_flagged pairs returned by time_aware_merge must reach
+    # detect_slides_freeze's result dict as result["merge_flagged"] — mirrors the
+    # existing "merged pairs surfaced on the result dict" proof above for the new
+    # third element of the tuple, so a dict-key typo or dropped element is caught
+    # here rather than only at the (separately tested) watch.py wiring layer.
+    periods = [(1.0, 4.0), (10.0, 4.0)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    fake_flagged = [(1.0, 10.0, 11, 9.0)]
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
+         patch("scripts.slides.time_aware_merge",
+               side_effect=lambda recs, **k: (recs, [], fake_flagged)):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=4.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=15.0, merge_dist=11,
+        )
+    assert out["merge_flagged"] == fake_flagged
+    assert out["merged"] == []
+    assert len(out["slides"]) == 2  # threshold-flagged frames are KEPT, not dropped
 
 
 @pytest.mark.integration
