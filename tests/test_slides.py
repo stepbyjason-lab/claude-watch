@@ -5,6 +5,7 @@ import pytest
 
 import scripts.slides as slides
 from scripts.slides import (
+    MERGE_MAX_VANISH,
     CandidateCapExceeded,
     build_crop_vf,
     detect_slide_crop,
@@ -18,10 +19,12 @@ from scripts.slides import (
     probe_dimensions,
     time_aware_merge,
     validate_freeze_noise,
+    vanish_ratio,
     _freeze_periods,
     _read_pgm,
     _surviving_audit_lines,
     _trim_high_motion_edges,
+    _vanish_from_grays,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_10s.mp4"
@@ -548,12 +551,20 @@ def _trecs(ts):
     return [{"index": i + 1, "t": float(t), "path": f"/tmp/m{i}.jpg"} for i, t in enumerate(ts)]
 
 
+def _permissive_vanish(_a, _b):
+    """A fake vanish_fn that always reports 0.0 (full containment) — used by tests
+    that exercise the gap/dist band logic and don't want the R10 containment gate to
+    interfere (those tests predate R10 and their real vanish_fn would otherwise hit
+    the real ffmpeg-backed vanish_ratio on fake /tmp paths)."""
+    return 0.0
+
+
 def test_time_aware_merge_drops_when_gap_and_dist_both_close():
     # gap=10 < 15, dist=3 < 11 -> merge (animation build-step)
     recs = _trecs([0, 10])
     hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0]
     assert merged == [(0.0, 10.0, 3, 10.0)]
     assert threshold_flagged == []
@@ -564,7 +575,7 @@ def test_time_aware_merge_keeps_when_time_far():
     recs = _trecs([0, 20])
     hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0, 20.0]
     assert merged == []
     assert threshold_flagged == []
@@ -575,7 +586,7 @@ def test_time_aware_merge_keeps_when_dist_far():
     recs = _trecs([0, 5])
     hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0xFFFFFFFFFFFFFFFF}
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0, 5.0]
     assert merged == []
     assert threshold_flagged == []
@@ -587,7 +598,7 @@ def test_time_aware_merge_boundary_gap_equal_threshold_is_not_merged():
     recs = _trecs([0, 15])
     hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0, 15.0]
     assert merged == []
     assert threshold_flagged == []
@@ -600,7 +611,7 @@ def test_time_aware_merge_boundary_dist_equal_threshold_is_flagged_not_merged():
     recs = _trecs([0, 10])
     hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0b111_1111_1111}  # 11 bits set -> dist 11
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0, 10.0]
     assert merged == []
     assert threshold_flagged == [(0.0, 10.0, 11, 10.0)]
@@ -610,7 +621,7 @@ def test_time_aware_merge_disabled_when_merge_gap_zero():
     recs = _trecs([0, 1, 2])
     hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0, "/tmp/m2.jpg": 0}
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=0, merge_dist=11, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     assert kept == recs
     assert merged == []
     assert threshold_flagged == []
@@ -626,7 +637,7 @@ def test_time_aware_merge_at_dist_zero_only_merges_identical_hashes():
     recs = _trecs([0, 1, 2])
     hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0, "/tmp/m2.jpg": 0b1}
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=0, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=15.0, merge_dist=0, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0, 1.0, 2.0]
     assert merged == []
     assert threshold_flagged == [(0.0, 1.0, 0, 1.0)]
@@ -634,7 +645,7 @@ def test_time_aware_merge_at_dist_zero_only_merges_identical_hashes():
 
 def test_time_aware_merge_empty_input():
     kept, merged, threshold_flagged = time_aware_merge(
-        [], merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
+        [], merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0, vanish_fn=_permissive_vanish)
     assert kept == []
     assert merged == []
     assert threshold_flagged == []
@@ -643,7 +654,7 @@ def test_time_aware_merge_empty_input():
 def test_time_aware_merge_single_record():
     recs = _trecs([0])
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0, vanish_fn=_permissive_vanish)
     assert kept == recs
     assert merged == []
     assert threshold_flagged == []
@@ -655,7 +666,7 @@ def test_time_aware_merge_returns_3_tuple_shape():
     # R08 changes 2-tuple -> 3-tuple; pin it explicitly so a future signature drift
     # is caught here, not just at the (also-updated) detect_slides_freeze call site.
     result = time_aware_merge(_trecs([0]), merge_gap_s=15.0, merge_dist=11,
-                               hash_fn=lambda p, c: 0)
+                               hash_fn=lambda p, c: 0, vanish_fn=_permissive_vanish)
     assert isinstance(result, tuple)
     assert len(result) == 3
     kept, merged, threshold_flagged = result
@@ -675,7 +686,7 @@ def test_time_aware_merge_chains_through_multiple_builds():
         "/tmp/m3.jpg": 0b011,
     }
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0, 100.0]
     # each merged-in frame is recorded against the last KEPT frame (t=0), not the
     # previous frame in the chain (last-seen) — see test_time_aware_merge_compares_to_last_kept.
@@ -697,7 +708,7 @@ def test_time_aware_merge_compares_to_last_kept_not_last_seen():
     recs = _trecs([0, 10, 19])  # all gaps (10, 9) < 15 so time never gates this test
     hashes = {"/tmp/m0.jpg": 0b0, "/tmp/m1.jpg": 0b1, "/tmp/m2.jpg": 0xFFF}
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0, 19.0]
     assert merged == [(0.0, 10.0, 1, 10.0)]
     assert threshold_flagged == []
@@ -732,7 +743,7 @@ def test_time_aware_merge_threshold_keep_promotes_new_anchor():
         "/tmp/m2.jpg": 0b111_1111_1110,       # C: dist(C,B)=1 (merges into B if B is anchor)
     }
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p])
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], vanish_fn=_permissive_vanish)
     # If anchored at A: gap(C,A)=24 >= 15 -> C kept, no merge. That's NOT what we assert —
     # we assert C merges into B, proving the anchor promoted to B (the threshold-kept frame).
     assert [r["t"] for r in kept] == [0.0, 10.0]
@@ -752,7 +763,7 @@ def test_time_aware_merge_consults_hash_cache_before_hash_fn():
 
     kept, merged, threshold_flagged = time_aware_merge(
         recs, merge_gap_s=15.0, merge_dist=11, hash_fn=hash_fn_must_not_be_called,
-        hash_cache=cache)
+        hash_cache=cache, vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0]
     assert merged == [(0.0, 10.0, 3, 10.0)]
     assert threshold_flagged == []
@@ -765,7 +776,7 @@ def test_time_aware_merge_falls_back_to_hash_fn_when_not_in_cache():
     hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
     cache: dict[str, int] = {}  # empty — nothing precomputed
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], hash_cache=cache)
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p], hash_cache=cache, vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0]
 
 
@@ -775,10 +786,326 @@ def test_time_aware_merge_large_gap_same_hash_is_reshow_not_merge():
     # the hash matches exactly (dist=0, the closest possible hash distance).
     recs = _trecs([0, 20])
     kept, merged, threshold_flagged = time_aware_merge(
-        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0)
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: 0, vanish_fn=_permissive_vanish)
     assert [r["t"] for r in kept] == [0.0, 20.0]
     assert merged == []
     assert threshold_flagged == []
+
+
+# ---- R10 value-mismatch gate: _vanish_from_grays / vanish_ratio / time_aware_merge ----
+#
+# _vanish_from_grays is a VALUE-based mismatch metric, not mask containment (see its
+# docstring for why the earlier mask-containment version was field-rejected: it scored
+# a real false-merge pair as low as 0.005 because two distinct slides' titles shared
+# the same on-screen position, so their content MASKS overlapped even though the pixel
+# VALUES underneath were completely different).
+
+def _flat(value, w, h):
+    return [value] * (w * h)
+
+
+def test_vanish_from_grays_identical_frames_is_zero():
+    w, h = 8, 4
+    a = _gray_with_content(range(0, 2), w=w, h=h)
+    v = _vanish_from_grays(a, a, w, h)
+    assert v == 0.0
+
+
+def test_vanish_from_grays_pure_addition_is_zero():
+    # A's content pixels keep their exact values in B; B adds new content elsewhere.
+    # Every A-content pixel finds a same-value match in its own B neighborhood ->
+    # vanish 0.0, regardless of B's extra additions.
+    w, h = 8, 20
+    a = _gray_with_content(range(0, 2), w=w, h=h)
+    b = _gray_with_content(list(range(0, 2)) + list(range(10, 12)), w=w, h=h)
+    v = _vanish_from_grays(a, b, w, h)
+    assert v == 0.0
+
+
+def test_vanish_from_grays_full_replacement_is_one():
+    # A's content is entirely gone (background) in B; B has new, non-overlapping
+    # content at different rows -> no A-content pixel finds a close value in B.
+    w, h = 8, 20
+    a = _gray_with_content(range(0, 2), w=w, h=h)
+    b = _gray_with_content(range(10, 12), w=w, h=h)
+    v = _vanish_from_grays(a, b, w, h)
+    assert v == 1.0
+
+
+def test_vanish_from_grays_same_position_different_content_is_one():
+    # THE FIELD BUG THIS REVISION FIXES: A has a content block at rows R with value
+    # v1 (a title's glyph brightness); B has a content block at the SAME rows R but a
+    # different value v2 (a different title at the same centered position on a
+    # uniform-template deck). Both v1 and v2 are far enough from their own frame's
+    # background to register as content, but |v1-v2| is also > content_delta, so
+    # nothing near A's content position in B has a matching value.
+    #
+    # Under the OLD mask-containment metric this scored ~0.0: B's mask overlaps A's
+    # mask at exactly the same rows, so containment sees "content still there" and
+    # calls it a survival -- the false-merge bug. Under the NEW value-mismatch
+    # metric this must score ~1.0: no B pixel near A's position has a value close to
+    # A's, so every A-content pixel counts as mismatched. This is the regression pin
+    # for the whole R10 rewrite -- see the mutation check via subclass override below.
+    w, h = 8, 20
+    bg, v1, v2 = 40, 220, 120  # |v1-bg|=180>32 content; |v2-bg|=80>32 content; |v1-v2|=100>32 mismatch
+    rows = [8, 9, 10, 11]
+
+    def raster_with_value(value):
+        buf = []
+        for y in range(h):
+            buf.extend([value] * w if y in rows else [bg] * w)
+        return buf
+
+    a = raster_with_value(v1)
+    b = raster_with_value(v2)
+    v = _vanish_from_grays(a, b, w, h)
+    assert v == pytest.approx(1.0)
+
+
+def test_vanish_from_grays_partial_vanish_ratio_is_accurate():
+    # A has 2 equal-sized, well-separated content rows (0 and 5, far enough apart
+    # that the 3x3 neighborhood search around one can't reach the other); B keeps
+    # row 0's content at the same value but row 5 has become background -> exactly
+    # half of A's content pixels find no close-value match nearby.
+    w, h = 8, 20
+    a = _gray_with_content([0, 5], w=w, h=h)
+    b = _gray_with_content([0], w=w, h=h)
+    v = _vanish_from_grays(a, b, w, h)
+    assert v == pytest.approx(0.5)
+
+
+def test_vanish_from_grays_is_asymmetric_one_way_anchor_test():
+    # The metric is one-way A -> B (did the ANCHOR's content survive?). On the
+    # partial-vanish fixture above: half of A's content is gone in B (0.5), but ALL
+    # of B's content still exists in A (0.0). Pins the argument order directly —
+    # a swapped call site (vanish_fn(candidate, anchor)) would invert these numbers,
+    # silently weakening the gate to "did B's content already exist in A".
+    w, h = 8, 20
+    a = _gray_with_content([0, 5], w=w, h=h)
+    b = _gray_with_content([0], w=w, h=h)
+    assert _vanish_from_grays(a, b, w, h) == pytest.approx(0.5)
+    assert _vanish_from_grays(b, a, w, h) == pytest.approx(0.0)
+
+
+def test_merge_max_vanish_stays_below_field_false_merge_floor():
+    # Field-measured class separation (docs/dogfood/2026-07-02-merge-defaults-
+    # cross-deck.md + R10 tuning): distinct-slide (false-merge) pairs floor at
+    # ~0.153, the legitimate forum build-step sits at ~0.058. The constant must
+    # stay inside that gap — a drive-by edit to e.g. 0.5 would silently reopen
+    # the uniform-template slide-loss bug with every unit test still green.
+    assert 0.05 < MERGE_MAX_VANISH < 0.15
+
+
+def test_vanish_from_grays_1px_shift_tolerated_by_neighborhood_min():
+    # A's content occupies column 3 in every row of a content band; B's matching
+    # content (same value) is shifted by 1px to column 4. Without neighborhood
+    # tolerance this would show as a near-total mismatch; the 3x3 neighborhood-min
+    # search around column 3 reaches column 4 in B, finds the same value, and scores
+    # a close match -- keeping vanish low despite the shift.
+    w, h = 8, 8
+    bg, fg = 40, 220
+
+    def col_raster(col):
+        buf = []
+        for _y in range(h):
+            row = [bg] * w
+            row[col] = fg
+            buf.extend(row)
+        return buf
+
+    a = col_raster(3)
+    b = col_raster(4)
+    v = _vanish_from_grays(a, b, w, h)
+    assert v < 0.2  # neighborhood tolerance keeps this low, not ~1.0
+
+
+def test_vanish_from_grays_empty_anchor_is_zero_no_zero_division():
+    # A is pure background (no content pixels at all) -> vanish is trivially 0.0,
+    # and must not raise ZeroDivisionError.
+    w, h = 8, 8
+    a = _flat(40, w, h)
+    b = _gray_with_content(range(0, 4), w=w, h=h)
+    v = _vanish_from_grays(a, b, w, h)
+    assert v == 0.0
+
+
+def test_vanish_from_grays_rejects_mismatched_pixel_count():
+    with pytest.raises(ValueError):
+        _vanish_from_grays([0, 1, 2], [0, 1, 2, 3], 2, 2)
+
+
+def test_vanish_ratio_delegates_to_ffmpeg_and_pure_mask(monkeypatch):
+    # vanish_ratio's own contract: extract A and B via ffmpeg (mirroring dhash's
+    # subprocess pattern), then delegate to _vanish_from_grays (the value-mismatch
+    # metric). Patch subprocess.run to serve deterministic rasters and confirm the
+    # returned ratio matches what _vanish_from_grays would compute directly on the
+    # same bytes. Uses explicit width/height so this is independent of vanish_ratio's
+    # default extraction size.
+    w, h = 64, 36
+    a_bytes = bytes(_gray_with_content(range(0, 6), w=w, h=h))
+    b_bytes = bytes(_gray_with_content(range(20, 26), w=w, h=h))  # full replacement
+
+    def fake_run(cmd, **kwargs):
+        image_path = cmd[cmd.index("-i") + 1]
+        data = a_bytes if str(image_path) == "a.jpg" else b_bytes
+        return MagicMock(returncode=0, stdout=data)
+
+    monkeypatch.setattr(slides.subprocess, "run", fake_run)
+    result = vanish_ratio("a.jpg", "b.jpg", width=w, height=h)
+    assert result == _vanish_from_grays(a_bytes, b_bytes, w, h)
+    assert result == pytest.approx(1.0)
+
+
+def test_vanish_ratio_default_extraction_size_is_128x72(monkeypatch):
+    # R10 revision: default extraction size raised from 64x36 to 128x72 (the
+    # value-mismatch metric was field-tuned at 128x72; see MERGE_MAX_VANISH's
+    # comment). Pin the default so a future change to it is deliberate, not
+    # accidental -- confirm the ffmpeg -vf filter actually requests 128x72 when no
+    # explicit width/height is passed.
+    seen_cmds = []
+
+    def fake_run(cmd, **kwargs):
+        seen_cmds.append(cmd)
+        return MagicMock(returncode=0, stdout=bytes(_flat(40, 128, 72)))
+
+    monkeypatch.setattr(slides.subprocess, "run", fake_run)
+    vanish_ratio("a.jpg", "b.jpg")
+    for cmd in seen_cmds:
+        vf = cmd[cmd.index("-vf") + 1]
+        assert "scale=128:72" in vf
+
+
+def test_vanish_ratio_raises_on_short_ffmpeg_output(monkeypatch):
+    monkeypatch.setattr(
+        slides.subprocess, "run",
+        lambda *a, **k: MagicMock(returncode=0, stdout=b"\x00" * 10),
+    )
+    with pytest.raises(RuntimeError):
+        vanish_ratio("a.jpg", "b.jpg", width=64, height=36)
+
+
+def test_time_aware_merge_band_pass_low_vanish_merges():
+    recs = _trecs([0, 10])
+    hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p],
+        vanish_fn=lambda a, b: 0.0)
+    assert [r["t"] for r in kept] == [0.0]
+    assert merged == [(0.0, 10.0, 3, 10.0)]
+    assert threshold_flagged == []
+
+
+def test_time_aware_merge_band_pass_high_vanish_rejects_and_becomes_new_anchor():
+    # gap+dist band-pass but vanish above MERGE_MAX_VANISH -> reject the merge: the
+    # candidate is KEPT (normal keep path), NOT recorded in merged or
+    # threshold_flagged, and becomes the new anchor for the next comparison.
+    recs = _trecs([0, 10, 11])
+    hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111, "/tmp/m2.jpg": 0b111}
+    # frame1 rejects against frame0 (high vanish); frame2 is far in time/dist from
+    # frame0 but if frame1 became the anchor, frame2 (gap=1<15, dist=0<11, vanish low)
+    # would merge into frame1 -- proving frame1 (not frame0) is the active anchor.
+    vanish_calls = []
+
+    def fake_vanish(a, b):
+        vanish_calls.append((a, b))
+        if b == "/tmp/m1.jpg":
+            return 1.0  # reject frame1's merge into frame0
+        return 0.0  # frame2 merges into frame1 if frame1 is correctly the anchor
+
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p],
+        vanish_fn=fake_vanish)
+    assert [r["t"] for r in kept] == [0.0, 10.0]
+    assert merged == [(10.0, 11.0, 0, 1.0)]
+    assert threshold_flagged == []
+    # vanish_fn was called for both band-passing pairs, anchored correctly each time.
+    assert vanish_calls == [("/tmp/m0.jpg", "/tmp/m1.jpg"), ("/tmp/m1.jpg", "/tmp/m2.jpg")]
+
+
+@pytest.mark.parametrize("exc", [
+    OSError("ffmpeg not found"),
+    # vanish_ratio's own short/corrupt-read failure is a RuntimeError — the fail-safe
+    # must catch it too, or a single truncated JPEG crashes the whole --slides run
+    # instead of the documented warn+reject degradation (R10 iter-1 P1).
+    RuntimeError("vanish_ratio expected 9216 gray bytes, got 10"),
+])
+def test_time_aware_merge_vanish_fn_raising_warns_and_keeps(exc):
+    recs = _trecs([0, 10])
+    hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
+
+    def boom(a, b):
+        raise exc
+
+    with pytest.warns(RuntimeWarning, match="vanish_fn failed"):
+        kept, merged, threshold_flagged = time_aware_merge(
+            recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p],
+            vanish_fn=boom)
+    assert [r["t"] for r in kept] == [0.0, 10.0]
+    assert merged == []
+    assert threshold_flagged == []
+
+
+def test_time_aware_merge_vanish_fn_called_only_for_band_passing_pairs():
+    # A pair failing the gap gate and a pair failing the dist gate must NOT trigger
+    # vanish_fn at all -- pin the call count/args so vanish_fn's cost tracks only
+    # actual merge candidates, not every consecutive pair.
+    recs = _trecs([0, 20, 21])  # gap(0,20)=20>=15 (fails gap); gap(20,21)=1<15
+    hashes = {
+        "/tmp/m0.jpg": 0b000,
+        "/tmp/m1.jpg": 0b000,                     # dist(1,0)=0<11 but gap fails -> no vanish call
+        "/tmp/m2.jpg": 0xFFFFFFFFFFFFFFFF,        # dist(2,1) huge -> fails dist gate -> no vanish call
+    }
+    calls = []
+
+    def tracking_vanish(a, b):
+        calls.append((a, b))
+        return 0.0
+
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p],
+        vanish_fn=tracking_vanish)
+    assert calls == []  # neither pair reached the gap+dist band
+    assert [r["t"] for r in kept] == [0.0, 20.0, 21.0]
+    assert merged == []
+
+
+def test_time_aware_merge_dist_equal_threshold_does_not_consult_vanish():
+    # dist == merge_dist is the R08 threshold-flag path, unchanged by R10: it must
+    # KEEP + flag without ever calling vanish_fn. Pin this with a vanish_fn that
+    # raises if called at all.
+    recs = _trecs([0, 10])
+    hashes = {"/tmp/m0.jpg": 0, "/tmp/m1.jpg": 0b111_1111_1111}  # dist 11 == merge_dist
+
+    def must_not_be_called(a, b):
+        raise AssertionError("vanish_fn must not be consulted on the exact-threshold path")
+
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p],
+        vanish_fn=must_not_be_called)
+    assert [r["t"] for r in kept] == [0.0, 10.0]
+    assert merged == []
+    assert threshold_flagged == [(0.0, 10.0, 11, 10.0)]
+
+
+def test_merge_max_vanish_boundary_is_inclusive_merge():
+    # vanish exactly at MERGE_MAX_VANISH must still merge (<=, not <) — pin the
+    # boundary explicitly so a future off-by-one doesn't silently flip it.
+    recs = _trecs([0, 10])
+    hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p],
+        vanish_fn=lambda a, b: MERGE_MAX_VANISH)
+    assert merged == [(0.0, 10.0, 3, 10.0)]
+
+
+def test_merge_max_vanish_just_above_boundary_rejects():
+    recs = _trecs([0, 10])
+    hashes = {"/tmp/m0.jpg": 0b000, "/tmp/m1.jpg": 0b111}
+    kept, merged, threshold_flagged = time_aware_merge(
+        recs, merge_gap_s=15.0, merge_dist=11, hash_fn=lambda p, c: hashes[p],
+        vanish_fn=lambda a, b: MERGE_MAX_VANISH + 0.001)
+    assert merged == []
+    assert [r["t"] for r in kept] == [0.0, 10.0]
 
 
 def test_detect_slides_freeze_merge_gap_zero_skips_merge_pass(tmp_path):
@@ -874,6 +1201,40 @@ def _dhash_bits_to_gray_bytes(bits64: int) -> bytes:
     return bytes(flat)
 
 
+# R10: vanish_ratio's ffmpeg call uses `-vf scale=WxH,format=gray` (default 128x72,
+# raised from 64x36 with this revision — the value-mismatch metric was field-tuned at
+# 128x72), distinguishable from dhash's `-vf {crop}scale=9:8,format=gray` by the scale
+# size — a real-pipeline test's fake_run must dispatch on this to serve the right
+# raster to each of dhash's and vanish_ratio's ffmpeg calls.
+_VANISH_W, _VANISH_H = 128, 72
+
+
+def _is_vanish_call(cmd: list[str]) -> bool:
+    vf = cmd[cmd.index("-vf") + 1]
+    return f"scale={_VANISH_W}:{_VANISH_H}" in vf
+
+
+def _solid_gray_bytes(value: int, w: int = _VANISH_W, h: int = _VANISH_H) -> bytes:
+    """A uniform background-only raster (no content) at the vanish extraction size."""
+    return bytes([value]) * (w * h)
+
+
+def _gray_with_content(
+    content_rows: range | list[int], *, bg: int = 40, fg: int = 220,
+    w: int = _VANISH_W, h: int = _VANISH_H,
+) -> bytes:
+    """A raster with a uniform background and a block of bright "content" rows —
+    stands in for a title line / bullet block against a dark background, at the
+    vanish extraction size (default 128x72)."""
+    rows = set(content_rows)
+    buf = bytearray()
+    for y in range(h):
+        row_val = fg if y in rows else bg
+        buf.extend([row_val] * w)
+    assert len(buf) == w * h
+    return bytes(buf)
+
+
 def test_detect_slides_freeze_real_merge_end_to_end(tmp_path):
     # Unlike the mocked-time_aware_merge tests above, this exercises the REAL
     # phash_dedup + REAL time_aware_merge running back to back (patching only the
@@ -894,10 +1255,23 @@ def test_detect_slides_freeze_real_merge_end_to_end(tmp_path):
         return recs
 
     hashes_by_name = {"0001.jpg": 0b0000, "0002.jpg": 0xFFF, "0003.jpg": 0b0011}
+    # vanish rasters: only frame2/frame3 (the merge-band pair) need a deliberate
+    # additive relationship — frame2's content (rows 0-5) stays present in frame3,
+    # which also adds a second content block (rows 10-13) -> low vanish -> merge
+    # proceeds. Content rows stay a clear minority of the 72-row raster so the
+    # per-frame median background level doesn't flip to the content value.
+    # frame1's raster is irrelevant to any vanish call (it's never a merge anchor).
+    vanish_grays = {
+        "0002.jpg": _gray_with_content(range(0, 6)),
+        "0003.jpg": _gray_with_content(list(range(0, 6)) + list(range(10, 14))),
+    }
 
     def fake_run(cmd, **kwargs):
         image_path = cmd[cmd.index("-i") + 1]
-        bits = hashes_by_name[Path(image_path).name]
+        name = Path(image_path).name
+        if _is_vanish_call(cmd):
+            return MagicMock(returncode=0, stdout=vanish_grays.get(name, _solid_gray_bytes(40)))
+        bits = hashes_by_name[name]
         return MagicMock(returncode=0, stdout=_dhash_bits_to_gray_bytes(bits))
 
     with patch("scripts.slides._freeze_periods", return_value=periods), \
@@ -910,7 +1284,8 @@ def test_detect_slides_freeze_real_merge_end_to_end(tmp_path):
         )
     # scene t = period start + min(dur/2, 3.0): starts 1/10/11 (dur 4) -> t 3/12/13.
     # frame1 (t=3) and frame2 (t=12) both survive phash_dedup (dist 12 > flag_dist 10);
-    # time_aware_merge then folds frame3 (t=13) into frame2 (gap=1<15, dist=10<11).
+    # time_aware_merge then folds frame3 (t=13) into frame2 (gap=1<15, dist=10<11,
+    # vanish~0 -- frame2's content survives additively in frame3).
     assert [s["t"] for s in out["slides"]] == [3.0, 12.0]
     assert [s["index"] for s in out["slides"]] == [1, 2]  # reindexed 1..N
     remaining = {p.name for p in tmp_path.glob("*.jpg")}
@@ -947,10 +1322,20 @@ def test_detect_slides_freeze_survivors_filter_drops_flagged_via_real_pipeline(t
     # drop_dist=4, flag_dist=10, merge_dist=11: 4 < 7 <= 10 -> real phash_dedup
     # FLAGS the pair (keeps both frames). Then dist 7 < merge_dist 11.
     hashes_by_name = {"0001.jpg": 0b0000000, "0002.jpg": 0b1111111}
+    # vanish raster: frame1's content (rows 0-5) stays present (additively) in
+    # frame2 (rows 0-5 plus a new block 10-13) -> low vanish -> the merge this test
+    # is pinning still fires. Content rows stay a minority of the 72-row raster.
+    vanish_grays = {
+        "0001.jpg": _gray_with_content(range(0, 6)),
+        "0002.jpg": _gray_with_content(list(range(0, 6)) + list(range(10, 14))),
+    }
 
     def fake_run(cmd, **kwargs):
         image_path = cmd[cmd.index("-i") + 1]
-        bits = hashes_by_name[Path(image_path).name]
+        name = Path(image_path).name
+        if _is_vanish_call(cmd):
+            return MagicMock(returncode=0, stdout=vanish_grays.get(name, _solid_gray_bytes(40)))
+        bits = hashes_by_name[name]
         return MagicMock(returncode=0, stdout=_dhash_bits_to_gray_bytes(bits))
 
     with patch("scripts.slides._freeze_periods", return_value=periods), \
@@ -962,8 +1347,8 @@ def test_detect_slides_freeze_survivors_filter_drops_flagged_via_real_pipeline(t
             merge_gap_s=15.0, merge_dist=11,
         )
     # scene t = period start + min(dur/2, 3.0): starts 1/10 (dur 4) -> t 3.0/12.0.
-    # gap = 12.0 - 3.0 = 9.0 (< merge_gap_s 15) and dist 7 < merge_dist 11 ->
-    # time_aware_merge folds frame2 (t=12.0) into frame1 (t=3.0).
+    # gap = 12.0 - 3.0 = 9.0 (< merge_gap_s 15) and dist 7 < merge_dist 11, vanish~0
+    # (additive raster) -> time_aware_merge folds frame2 (t=12.0) into frame1 (t=3.0).
     assert [s["t"] for s in out["slides"]] == [3.0]
     assert out["merged"] == [(3.0, 12.0, 7, 9.0)]
     # The key R09 assertion: real phash_dedup produced flagged=[(3.0, 12.0, 7)],

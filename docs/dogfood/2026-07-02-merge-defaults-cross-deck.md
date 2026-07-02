@@ -146,5 +146,14 @@ recommended direction, for discussion:
 Reversing the R06 default is a product decision, so it is left for the user rather than
 changed unilaterally here.
 
+**2026-07-02 follow-up (R10):** the opt-in/default-off direction above was superseded
+rather than implemented. Instead, R10 added a third option this record didn't
+consider: a containment ("vanish") gate on top of the existing gap+dist band, so a
+pair only merges if the anchor frame's content also survives in the candidate — the
+signal distance alone can't provide, per Result A above. This keeps the merge default
+on (so Result B's legitimate build-steps still fold) while rejecting the false
+merges this dogfood found. See the CHANGELOG `[Unreleased]` entry "Time-aware merge is
+now containment-gated" for the mechanism and field-tuned threshold.
+
 Companion to [`2026-06-28-auto-crop-field-limits.md`](2026-06-28-auto-crop-field-limits.md)
 (the `--crop`/`--probe-frame` field record on the forum clip).

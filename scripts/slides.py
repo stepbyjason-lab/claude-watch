@@ -72,6 +72,18 @@ def hamming(a: int, b: int) -> int:
     return (a ^ b).bit_count()
 
 
+# R10 containment-gate tuning: field-tuned on three dogfood decks (a dark-minimalist
+# deck, a content-dense mixed deck, a Zoom forum recording), measured with the
+# value-mismatch metric (see `_vanish_from_grays`) at 128x72 / content_delta=32 on
+# real pipeline crops. The false-merge class floor (distinct slides, same centered
+# title position) measured 0.153 — 1.9x above this threshold. The lowest legitimate
+# build-step measured (a forum-clip animation) was 0.058 — 1.4x below it. 0.08 sits
+# in that gap, biased toward recall (closer to the build-step floor than the
+# false-merge floor, so a genuinely ambiguous pair is more likely to be kept/flagged
+# than silently folded away).
+MERGE_MAX_VANISH = 0.08
+
+
 def dhash(image_path: str | Path, crop_vf: str = "") -> int:
     """Compute a zero-dependency 64-bit difference (gradient) hash through ffmpeg.
 
@@ -118,6 +130,184 @@ def dhash(image_path: str | Path, crop_vf: str = "") -> int:
                 bits |= 1 << pos
             pos += 1
     return bits
+
+
+def _vanish_from_grays(
+    gray_a: bytes | list[int],
+    gray_b: bytes | list[int],
+    width: int,
+    height: int,
+    *,
+    content_delta: int = 32,
+) -> float:
+    """Pure mask/value arithmetic behind `vanish_ratio`, separated from ffmpeg so it
+    can be unit-tested with hand-built rasters instead of real frames.
+
+    Both `gray_a`/`gray_b` are row-major grayscale buffers of length `width*height`
+    (0-255 per pixel). This is a **value-based mismatch** metric, not mask
+    containment. An earlier version of this function checked only whether B's content
+    *mask* overlapped A's content mask (dilated 1px for shift tolerance) — that
+    version was field-measured to fail: on a sparse, uniform-template deck (dark
+    background, one centered title line per slide), two *distinct* slides whose
+    titles happen to sit at the same on-screen position produce content masks that
+    overlap almost completely (same rows/columns lit up), even though the actual text
+    is different. Mask-containment scored a real false-merge pair as low as 0.005 —
+    it saw "content still there" and ignored that the content's *pixel values* had
+    completely changed. Re-tuned on 15 verified pairs from three real decks (see
+    `MERGE_MAX_VANISH`'s comment): the same false-merge class scores 0.153+ under
+    this value-based metric.
+
+    Algorithm:
+      1. `bg_a = median(gray_a)` — each frame's own background level, robust to a
+         sparse, mostly-background slide.
+      2. `A_content = {p : |gray_a[p] - bg_a| > content_delta}` — A's on-screen
+         content pixels (title/body text, not background).
+      3. For every pixel `p` in `A_content`, look at B's 3x3 neighborhood around `p`
+         (tolerates a ~1px shift from scaling/antialiasing between two
+         independently-extracted frames) and take `best = min(|gray_a[p] -
+         gray_b[n]|)` over that neighborhood. If `best > content_delta`, `p` counts as
+         mismatched — no pixel near its position in B has a close enough *value* to
+         A's, whether because B's background replaced it (vanished) or because
+         different content (a different title's glyphs) now occupies that spot
+         (replaced). Both cases are true slide-change signals; only a near-identical
+         value nearby (the additive case — A's content is still literally there in B,
+         possibly redrawn a pixel off) clears the check.
+      4. `vanish = mismatch_count / max(|A_content|, 1)`.
+
+    This is why a true additive build-step (B keeps A's pixels byte-similar and only
+    adds new content elsewhere) still reads near 0.0 — every A-content pixel finds a
+    close-value match in its own B neighborhood — while a same-position
+    different-content replacement (a different title at the same rows) reads near
+    1.0, because the neighborhood-min never finds a value close to A's underneath the
+    new content.
+
+    Returns 0.0 (not a ZeroDivisionError) when A has no content pixels at all (a
+    blank/background-only anchor trivially "survives").
+    """
+    n = width * height
+    a = list(gray_a)
+    b = list(gray_b)
+    if len(a) != n or len(b) != n:
+        raise ValueError(
+            f"_vanish_from_grays expected {n} pixels ({width}x{height}), "
+            f"got {len(a)} (A) / {len(b)} (B)"
+        )
+
+    def _median(vals: list[int]) -> int:
+        s = sorted(vals)
+        mid = len(s) // 2
+        if len(s) % 2:
+            return s[mid]
+        return (s[mid - 1] + s[mid]) // 2
+
+    bg_a = _median(a) if a else 0
+
+    a_content_idx = [i for i, px in enumerate(a) if abs(px - bg_a) > content_delta]
+    if not a_content_idx:
+        return 0.0
+
+    mismatch = 0
+    for idx in a_content_idx:
+        y, x = divmod(idx, width)
+        val_a = a[idx]
+        best = None
+        for dy in (-1, 0, 1):
+            ny = y + dy
+            if ny < 0 or ny >= height:
+                continue
+            row_base = ny * width
+            for dx in (-1, 0, 1):
+                nx = x + dx
+                if nx < 0 or nx >= width:
+                    continue
+                diff = abs(val_a - b[row_base + nx])
+                if best is None or diff < best:
+                    best = diff
+        if best is None or best > content_delta:
+            mismatch += 1
+
+    return mismatch / len(a_content_idx)
+
+
+def vanish_ratio(
+    path_a: str | Path,
+    path_b: str | Path,
+    *,
+    width: int = 128,
+    height: int = 72,
+    content_delta: int = 32,
+) -> float:
+    """One-way anchor test: does A's on-screen content still *look the same* in B?
+
+    Field motivation (R10): on a sparse, uniform-template deck (dark background, one
+    centered title line per slide, same layout every slide), two *distinct* slides
+    differ only in a small strip of pixels (the title text), so their whole-frame
+    dhash distance lands at 5-10 — squarely inside the merge band that was meant to
+    catch same-screen build-steps. No dhash distance threshold separates the two
+    cases: the same dist-5 gap is a false merge on this deck and a legitimate
+    build-step on a different (content-dense) deck. See
+    `docs/dogfood/2026-07-02-merge-defaults-cross-deck.md` for the field measurements.
+
+    A mask-containment version of this check (does B have *any* content near A's
+    content) is not enough either: two distinct slides with same-position titles
+    (a common uniform-template pattern) produce near-identical content masks even
+    though the glyphs are completely different, scoring as low as 0.005 under pure
+    containment. `vanish_ratio` (via `_vanish_from_grays`) instead checks pixel
+    *values*: for every content pixel in A, is there a close-value match anywhere in
+    B's 3x3 neighborhood around that position? This catches both a vanished pixel
+    (gone to background) and a replaced pixel (different content's glyphs sit at the
+    same spot, different value) — see `_vanish_from_grays`'s docstring for the full
+    algorithm and field numbers.
+
+    The check is one-way **A -> B**: how much of A's content fails to survive
+    (by value) in B. B is free to add anything (a build step legitimately adds
+    bullets/elements); only A's survival is checked. Do not swap the arguments —
+    reversing the direction changes the semantics from "did A's content survive" to
+    "did B's content already exist in A", which is not the same question and does not
+    match the field evidence above.
+
+    Extracts both frames as `width`x`height` grayscale via ffmpeg (same subprocess
+    pattern as `dhash`: `-f rawvideo` gray output through an ffmpeg `-vf scale=...`
+    filter), then delegates the actual mismatch arithmetic to the pure
+    `_vanish_from_grays` (unit-tested separately with synthetic rasters).
+
+    Note: unlike `dhash`, this takes no `crop_vf` — the freeze call site hands it
+    frames that are ALREADY cropped on disk, so both signals see the same region.
+    A generic caller mixing uncropped paths with a crop-aware `hash_fn` would make
+    the two signals disagree about what part of the frame they judge.
+    """
+
+    def _extract_gray(path: str | Path) -> bytes:
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-protocol_whitelist",
+            "file",
+            "-i",
+            str(path),
+            "-vf",
+            f"scale={width}:{height},format=gray",
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-",
+        ]
+        raw = subprocess.run(cmd, capture_output=True, check=True).stdout
+        expected = width * height
+        if len(raw) != expected:
+            raise RuntimeError(
+                f"vanish_ratio expected {expected} gray bytes ({width}x{height}), "
+                f"got {len(raw)} for {path}"
+            )
+        return raw
+
+    gray_a = _extract_gray(path_a)
+    gray_b = _extract_gray(path_b)
+    return _vanish_from_grays(gray_a, gray_b, width, height, content_delta=content_delta)
 
 
 def phash_dedup(
@@ -183,9 +373,11 @@ def time_aware_merge(
     merge_dist: int = 11,
     hash_fn: Callable[[str | Path, str], int] = dhash,
     hash_cache: dict[str, int] | None = None,
+    vanish_fn: Callable[[str, str], float] = vanish_ratio,
 ) -> tuple[list[dict], list[tuple[float, float, int, float]], list[tuple[float, float, int, float]]]:
     """Freeze-only post-pass. Drop a frame into the previous KEPT frame iff it is BOTH
     close in time (gap < merge_gap_s) AND *strictly* close in hash (dist < merge_dist)
+    AND the anchor's content survives in the candidate (vanish_fn <= MERGE_MAX_VANISH)
     — an animation/scroll build-step of the same screen, not a genuine re-show or new
     slide. Compares only to the last KEPT frame (same structure as phash_dedup) — a
     merged (dropped) frame never becomes the comparison anchor for the next frame, so
@@ -193,8 +385,17 @@ def time_aware_merge(
     instead of drifting away one small step at a time.
 
     The decision band is split three ways when gap < merge_gap_s:
-    - `dist < merge_dist` -> merge (fold into the previous kept frame).
-    - `dist == merge_dist` -> KEEP, but flag it (`threshold_flagged`). A pair landing
+    - `dist < merge_dist` -> candidate for merge, gated by containment (R10, see
+      below): only merges if `vanish_fn(prev_kept_path, path) <= MERGE_MAX_VANISH`;
+      otherwise it is KEPT (a normal kept frame — becomes the new anchor like any
+      other) and is NOT recorded in `merged` or `threshold_flagged`. Such a rejected
+      pair sits at dist 5-10, which is already inside `phash_dedup`'s near-dup flag
+      band (`drop_dist < dist <= flag_dist`, default 4 < d <= 10), so the reader still
+      sees it via `review: near-dup` upstream — recall is preserved even though this
+      pass declines to merge it.
+    - `dist == merge_dist` -> KEEP, but flag it (`threshold_flagged`). This path is
+      UNCHANGED by R10 and does not consult `vanish_fn` at all — it is already the
+      preserve-and-surface behavior R10's containment gate is built on. A pair landing
       *exactly* on the threshold is the most fragile call this pass makes — one
       hamming-distance unit separates "same build step" from "different slide", and a
       few pixels of crop drift is enough to flip it. Field evidence: a ~6px crop
@@ -212,6 +413,28 @@ def time_aware_merge(
 
     A threshold-kept frame is itself a KEPT frame, so it becomes the new last-kept
     anchor for the next comparison, same as any other kept frame — no special case.
+    Same for a frame kept because the containment gate rejected its merge.
+
+    **R10 containment gate — why distance alone isn't enough.** Field evidence (see
+    `docs/dogfood/2026-07-02-merge-defaults-cross-deck.md`) found sparse,
+    uniform-template decks where two genuinely *distinct* slides differ only in a
+    small title strip, landing their dhash distance at 5-10 — squarely inside the
+    merge band, with no distance threshold able to separate them from a real
+    build-step (the same dist-5 gap was a false merge on one deck and a legitimate
+    build-step on another). `vanish_fn` (default `vanish_ratio`) adds a second, more
+    reliable signal: does the anchor's on-screen *content* survive in the candidate?
+    A build/scroll step is additive (content stays, more is added); a slide change
+    replaces it (content vanishes). The check is one-way, anchor -> candidate — the
+    candidate is free to add new content, only the anchor's survival is checked; see
+    `vanish_ratio`'s docstring for the full mask arithmetic. `vanish_fn` is called
+    ONLY for pairs that already pass the gap+dist band (so its cost tracks the
+    existing merge-candidate count, not every frame pair). If `vanish_fn` raises
+    (subprocess/OSError/ValueError — e.g. a frame file went missing or ffmpeg
+    failed), the exception is caught, a warning is emitted, and the pair is treated as
+    vanish=1.0 (i.e. rejected -> KEPT). This is a deliberate fail-safe: an
+    unmeasurable pair keeps the frame rather than silently merging on no evidence —
+    consistent with the project's recall-first stance (an extra kept frame is
+    recoverable at the notes step; a silently dropped slide is not).
 
     Returns `(kept, merged, threshold_flagged)`. `merged` records what got folded
     away, as `(prev_kept_t, dropped_t, dist, gap)` tuples, so a caller can surface it
@@ -232,6 +455,7 @@ def time_aware_merge(
     threshold_flagged: list[tuple[float, float, int, float]] = []
     last_hash: int | None = None
     last_t: float | None = None
+    last_path: str | None = None
 
     def _hash(rec: dict) -> int:
         path = rec["path"]
@@ -244,20 +468,39 @@ def time_aware_merge(
             kept.append(rec)
             last_hash = _hash(rec)
             last_t = rec["t"]
+            last_path = rec["path"]
             continue
 
         gap = rec["t"] - last_t
         current_hash = _hash(rec)
         distance = hamming(current_hash, last_hash)
         if gap < merge_gap_s and distance < merge_dist:
-            merged.append((last_t, rec["t"], distance, gap))
-            continue
+            try:
+                vanish = vanish_fn(last_path, rec["path"])
+            # RuntimeError included: vanish_ratio itself raises it on a short/corrupt
+            # ffmpeg read (same handling precedent as _probe_duration / mean_luma).
+            except (subprocess.SubprocessError, OSError, ValueError, RuntimeError) as exc:
+                warnings.warn(
+                    f"vanish_fn failed for {last_path!r} -> {rec['path']!r} ({exc}); "
+                    "treating as vanish=1.0 (reject merge, keep frame)",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                vanish = 1.0
+            if vanish <= MERGE_MAX_VANISH:
+                merged.append((last_t, rec["t"], distance, gap))
+                continue
+            # Containment gate rejected the merge: fall through to the normal keep
+            # path below (not recorded in merged or threshold_flagged — the dist 5-10
+            # band this rejects is already surfaced upstream by phash_dedup's
+            # near-dup flag, see docstring above).
 
         kept.append(rec)
         if gap < merge_gap_s and distance == merge_dist:
             threshold_flagged.append((last_t, rec["t"], distance, gap))
         last_hash = current_hash
         last_t = rec["t"]
+        last_path = rec["path"]
 
     return kept, merged, threshold_flagged
 
@@ -746,12 +989,17 @@ def detect_slides_freeze(
 
     After dedup, `time_aware_merge` collapses animation/scroll build-steps that are
     both close in time (< `merge_gap_s`) and strictly close in hash (< `merge_dist`)
-    into the preceding kept frame. A pair landing *exactly* on `merge_dist` is the
-    most fragile call this pass makes (one hamming-distance unit from either
-    decision) — instead of merging it, that frame is kept and the pair is recorded so
-    the caller can surface it for review; see `time_aware_merge`'s docstring for the
-    field evidence behind this. Pass `merge_gap_s <= 0` or `merge_dist <= 0` to
-    disable this pass entirely and restore byte-identical pre-merge (R05) behavior.
+    into the preceding kept frame — and, as of R10, only if the preceding frame's
+    content also survives (is still present) in the candidate frame; a pair that hits
+    the time+hash band but where the anchor's content vanishes (a same-template,
+    different-title slide change, not a build-step) is kept instead of merged. See
+    `time_aware_merge`'s docstring and `vanish_ratio` for the containment-gate details
+    and field evidence. A pair landing *exactly* on `merge_dist` is the most fragile
+    call this pass makes (one hamming-distance unit from either decision) — instead of
+    merging it, that frame is kept and the pair is recorded so the caller can surface
+    it for review (this exact-threshold path is unchanged by R10 and does not consult
+    the containment gate). Pass `merge_gap_s <= 0` or `merge_dist <= 0` to disable this
+    pass entirely and restore byte-identical pre-merge (R05) behavior.
 
     The merged pairs are returned as `result["merged"]` (mirroring `result["flagged"]`
     from `phash_dedup`) so a caller can surface exactly what got folded away. The
