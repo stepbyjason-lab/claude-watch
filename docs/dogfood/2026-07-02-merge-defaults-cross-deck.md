@@ -155,5 +155,44 @@ on (so Result B's legitimate build-steps still fold) while rejecting the false
 merges this dogfood found. See the CHANGELOG `[Unreleased]` entry "Time-aware merge is
 now containment-gated" for the mechanism and field-tuned threshold.
 
+## 2026-07-02 follow-up 2: the R10 gate held on three further, unseen decks
+
+After R10 landed (`655f373`), the gate was validated on three more lectures from the
+same library, none used for tuning, again picked for style diversity: a **document-
+scroll lecture** (Notion-style page + corner cam, 2560×1440, 12-min slice), a **long
+webinar** with a side banner column and live notepad/browser demos (1920×1080, 12-min
+slice of a 5.8 h recording; crop `1456:822:0:96`, measured off a `--probe-frame` grab
+via pixel-strip sampling), and a **filmed talking-head edit** with burned-in captions and
+composited demo overlays (1920×1080, full 25 min). All with `--hold 3` and the default
+merge.
+
+Results: 33 / 31 / 15 frames; near-dup lines 16 / 6 / 7; `review: merge-threshold`
+lines 3 / 1 / 0; and **6 `merged:` lines total — all 6 same-screen progressions**
+(each pair extracted from the source and read side-by-side): a tooltip appearing on the
+same tool page (dist 9), the same composited demo scene with the typed prompt growing
+(dist 5), three live-notepad typing progressions (dist 5–10), and a cursor-only change
+(dist 5). No distinct slide, page, or screen was folded. Two honest nuances, disclosed
+rather than rounded away: (1) in the composited-demo pair, the **burned-in caption text
+also changed** between anchor and dropped frame ("너는 상세 페이지 기획 전문가야" →
+"그리고 1500자로 정리해 줘") — we judge it a same-screen progression because the demo
+scene itself is the same screen advancing and the caption tracks narration the
+transcript already carries, but that is an editorial weighting, not a settled rule: a
+consumer who treats burned-in captions as primary content loses that variant; (2) a mid-typing transient
+(a 2-character line the presenter typed then replaced) was folded into its notepad
+anchor — the durable notepad content survives in later kept frames, but sub-line typing
+states are within the gate's tolerance by design. The ambiguous cases the gate
+*rejected* all surfaced as `review: near-dup` lines (16 on the scroll-heavy deck —
+scroll states preserved, the recoverable path).
+
+Cumulative field record for the containment gate across **six decks** (three tuning,
+three unseen): **9 merges fired post-R10, 9 / 9 verified same-screen, 0 slides lost
+to the merge step** (scoped claim: each merged pair was read side-by-side; the three
+new decks' kept sets were not additionally montage-cross-checked the way Deck A's 35
+were) — versus 10 / 10 false on the worst deck under the pre-R10 distance-only band.
+The gate held across dark-sparse, dense-infographic, Zoom-share, document-scroll,
+webinar-demo, and talking-head styles, though the post-R10 merge sample is small and
+skewed (4 of the 6 new merges come from one webinar's notepad typing); fades/gradient
+transitions remain untested (failure direction there is over-preservation, not loss).
+
 Companion to [`2026-06-28-auto-crop-field-limits.md`](2026-06-28-auto-crop-field-limits.md)
 (the `--crop`/`--probe-frame` field record on the forum clip).
