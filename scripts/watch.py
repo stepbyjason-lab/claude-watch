@@ -45,6 +45,21 @@ def _parse_ts(s: str) -> float:
     raise ValueError(f"bad timestamp: {s}")
 
 
+def _probe_timestamp(duration_s: float, override: str | None) -> float:
+    """Pick the timestamp for a --probe-frame capture.
+
+    `override` (--probe-at) is parsed via `_parse_ts` when given; otherwise
+    defaults to 25% into the video (layout chrome — cam/chat/toolbar position —
+    is fixed for the whole call, so an exact timestamp doesn't matter as long as
+    it avoids the intro/waiting-room start and the outro/Q&A end). Clamped into
+    [0, max(duration_s - 0.5, 0)] so an out-of-range --probe-at never hands
+    ffmpeg an out-of-range seek.
+    """
+    t = _parse_ts(override) if override is not None else duration_s * 0.25
+    hi = max(duration_s - 0.5, 0.0)
+    return min(max(t, 0.0), hi)
+
+
 def _focus_range(args) -> tuple[float, float] | None:
     if args.start is None and args.end is None:
         return None
@@ -73,6 +88,44 @@ def _validate_slides_focus(*, slides: bool, focus) -> None:
             "--slides cannot be combined with --start/--end in v1 "
             "(focus-windowed slide capture is not supported yet)"
         )
+
+
+def _validate_probe_args(*, probe_frame: bool, probe_at: str | None, slides: bool, focus) -> None:
+    """Fail fast on bad --probe-frame/--probe-at combinations, INCLUDING a
+    malformed --probe-at value.
+
+    --probe-at only means anything alongside --probe-frame; --probe-frame only
+    means anything alongside --slides (it measures the slide-region crop); and
+    --probe-frame + focus is redundant (--probe-at is the one-timestamp knob).
+    A --probe-at value that doesn't parse as a timestamp, or parses negative/
+    non-finite (nan/inf), is rejected here too — before the download — instead
+    of raising a raw ValueError out of `_parse_ts`, or crashing later in
+    `frames.format_filename` ("cannot convert float NaN to integer"), deep
+    inside Stage 2 (design decision: reject, don't silently clamp negatives,
+    matching `_validate_freeze_args`).
+    """
+    if probe_at is not None and not probe_frame:
+        sys.exit("--probe-at requires --probe-frame")
+    if probe_frame and not slides:
+        sys.exit("--probe-frame requires --slides (it measures the slide-region crop)")
+    if probe_frame and focus is not None:
+        sys.exit(
+            "--probe-frame cannot be combined with --start/--end "
+            "(use --probe-at to pick a single probe timestamp instead)"
+        )
+    if probe_at is not None and probe_frame:
+        try:
+            parsed = _parse_ts(probe_at)
+        except ValueError:
+            sys.exit(
+                f"--probe-at: bad timestamp {probe_at!r} "
+                "(expected SS, MM:SS, or HH:MM:SS)"
+            )
+        # math.isfinite rejects nan/inf, which slip past a bare `< 0` (nan
+        # comparisons are always False; inf < 0 is False) — same reasoning as
+        # `_validate_freeze_args`'s hold/light_threshold/merge_gap_s checks.
+        if not math.isfinite(parsed) or parsed < 0:
+            sys.exit(f"--probe-at must be a finite number >= 0; got {probe_at!r}")
 
 
 def _validate_freeze_args(
@@ -254,6 +307,64 @@ def select_scenes(video, meta, args, focus, work, *, cached):
     return frame_records, scenes, [], []
 
 
+def _emit_probe_frame_lines(
+    frame_path: Path, t: float, width: int, height: int, work: Path, source: str
+) -> None:
+    """Print the `--probe-frame` stdout block. Extracted from `_run_probe_frame` so
+    this structured block — the contract the LLM caller reads to measure a
+    `--crop W:H:X:Y` rectangle — is unit-testable via capsys without driving a
+    real download/extract; an untested inline print here is a silent-regression
+    risk (R06 precedent, same reasoning as `_emit_slide_review_lines`).
+
+    The displayed timestamp uses `round(t)` (via divmod), matching
+    `frames.format_filename`'s rounding — using `int(t)` here would truncate and
+    could drift up to 1s from the frame's actual filename.
+    """
+    mm, ss = divmod(round(t), 60)
+    print("=== probe frame ===")
+    print(f"frame: {frame_path}")
+    print(f"timestamp: t={mm:02d}:{ss:02d}")
+    print(f"source_resolution: {width}x{height}")
+    print(f"library_dir: {work}")
+    print()
+    print("next: Read the frame above. Identify the slide-region rectangle in SOURCE pixel")
+    print("coordinates (exclude presenter cam / chat panel / toolbar) using pixel-boundary")
+    print("sampling (color-transition detection), not eyeballing. Then re-run with the")
+    print("measured crop:")
+    print(f'  python3 watch.py "{source}" --slides --crop W:H:X:Y [...other flags]')
+
+
+def _run_probe_frame(video: Path, meta: dict, work: Path, args) -> int:
+    """Download-only probe: extract one native-resolution frame + report source
+    pixel dimensions, then exit. Lets Claude measure a `--crop W:H:X:Y` rectangle
+    without paying for a full detect/extract/transcribe pass with the wrong
+    (default cam-corner) crop already baked into the frames.
+
+    Writes meta.json (so a re-probe with the same flags reuses the cached
+    download) but does NOT write manifest.json — the pipeline never ran to
+    completion, and a manifest would misrepresent an unfinished run as done.
+    """
+    t = _probe_timestamp(meta["duration_s"], args.probe_at)
+    if args.probe_at is not None and abs(_parse_ts(args.probe_at) - t) > 1e-9:
+        print(
+            f"note: --probe-at {args.probe_at} clamped to t={t:.1f}s "
+            f"(duration {meta['duration_s']:.1f}s)",
+            file=sys.stderr,
+        )
+    probe_dir = work / "probe"
+    _wipe_frames_dir(probe_dir)
+    frame_records = frames_mod.extract_frames(
+        video, [scenes_mod.Scene(t=t, score=1.0, kind="probe")], out_dir=probe_dir, native=True
+    )
+    width, height = slides_mod.probe_dimensions(video)
+
+    (work / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+
+    frame_path = probe_dir / frame_records[0]["path"]
+    _emit_probe_frame_lines(frame_path, t, width, height, work, meta["source"])
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # Windows consoles/pipes often default to a legacy codec (e.g. cp949) that
     # cannot encode the en/em-dashes and non-ASCII titles we print, which would
@@ -315,11 +426,21 @@ def main(argv: list[str] | None = None) -> int:
                         "(freeze-only; merge requires BOTH this AND --merge-gap to match, "
                         "so setting EITHER to 0 disables the whole merge pass -> R05 "
                         "behavior, not just this half of it)")
+    p.add_argument("--probe-frame", action="store_true",
+                   help="slides only: download the source, extract ONE native-resolution "
+                        "frame + report its pixel dimensions, then exit (skips detect/"
+                        "extract/transcribe) -- for measuring a --crop W:H:X:Y rectangle "
+                        "before the full run")
+    p.add_argument("--probe-at", help="timestamp for --probe-frame (SS, MM:SS, or "
+                   "HH:MM:SS); default is 25%% into the video")
     args = p.parse_args(argv)
 
     if not _scheme_ok(args.source):
         sys.exit(f"refusing non-http(s)/local scheme: {args.source}")
     focus = _focus_range(args)
+    _validate_probe_args(
+        probe_frame=args.probe_frame, probe_at=args.probe_at, slides=args.slides, focus=focus
+    )
     _validate_slides_focus(slides=args.slides, focus=focus)
     if args.slides:
         _validate_slides_args(scene_threshold=args.scene_threshold, phash_dist=args.phash_dist)
@@ -385,6 +506,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             video = download_mod.copy_local(Path(meta["source"]), src_dir, basename="video")
+
+    if args.probe_frame:
+        return _run_probe_frame(video, meta, work, args)
 
     # ---- Stage 3: transcribe ----
     transcript_path = work / "transcript.json"

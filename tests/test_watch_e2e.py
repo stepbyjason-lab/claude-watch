@@ -1,16 +1,23 @@
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from scripts import library as lib
+from scripts import watch
 from scripts.watch import (
+    _emit_probe_frame_lines,
     _emit_slide_review_lines,
+    _probe_timestamp,
+    _run_probe_frame,
     _scheme_ok,
     _slides_advisories,
     _validate_freeze_args,
+    _validate_probe_args,
     _validate_slides_args,
     _validate_slides_focus,
     _wipe_frames_dir,
@@ -40,6 +47,88 @@ def test_validate_rejects_slides_with_focus():
         _validate_slides_focus(slides=True, focus=(10.0, 20.0))
     _validate_slides_focus(slides=True, focus=None)
     _validate_slides_focus(slides=False, focus=(1.0, 2.0))
+
+
+def test_validate_probe_args_rejects_probe_at_without_probe_frame():
+    with pytest.raises(SystemExit, match=re.escape("--probe-at requires --probe-frame")):
+        _validate_probe_args(probe_frame=False, probe_at="0:03", slides=True, focus=None)
+
+
+def test_validate_probe_args_rejects_probe_frame_without_slides():
+    with pytest.raises(
+        SystemExit, match=re.escape("--probe-frame requires --slides")
+    ):
+        _validate_probe_args(probe_frame=True, probe_at=None, slides=False, focus=None)
+
+
+def test_validate_probe_args_rejects_probe_frame_with_focus():
+    with pytest.raises(
+        SystemExit, match=re.escape("--probe-frame cannot be combined with --start/--end")
+    ):
+        _validate_probe_args(probe_frame=True, probe_at=None, slides=True, focus=(1.0, 2.0))
+
+
+def test_validate_probe_args_rejects_malformed_probe_at():
+    for bad in ("abc", "1:2:3:4"):
+        with pytest.raises(SystemExit, match=re.escape(f"--probe-at: bad timestamp {bad!r}")):
+            _validate_probe_args(probe_frame=True, probe_at=bad, slides=True, focus=None)
+
+
+def test_validate_probe_args_rejects_negative_probe_at():
+    with pytest.raises(
+        SystemExit,
+        match=re.escape("--probe-at must be a finite number >= 0; got '-5'"),
+    ):
+        _validate_probe_args(probe_frame=True, probe_at="-5", slides=True, focus=None)
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "1e400"])
+def test_validate_probe_args_rejects_non_finite_probe_at(bad):
+    # nan < 0 is False and inf > 0 is True, so a bare `< 0` check lets these
+    # slip past validation and crash later in frames.format_filename
+    # ("cannot convert float NaN to integer") — must be rejected here instead.
+    with pytest.raises(
+        SystemExit,
+        match=re.escape(f"--probe-at must be a finite number >= 0; got {bad!r}"),
+    ):
+        _validate_probe_args(probe_frame=True, probe_at=bad, slides=True, focus=None)
+
+
+def test_validate_probe_args_accepts_valid_combos():
+    _validate_probe_args(probe_frame=True, probe_at=None, slides=True, focus=None)
+    _validate_probe_args(probe_frame=True, probe_at="0:03", slides=True, focus=None)
+    _validate_probe_args(probe_frame=False, probe_at=None, slides=False, focus=None)
+    _validate_probe_args(probe_frame=False, probe_at=None, slides=True, focus=None)
+
+
+def test_probe_timestamp_defaults_to_quarter_duration():
+    assert _probe_timestamp(100.0, None) == 25.0
+
+
+def test_probe_timestamp_uses_override_when_given():
+    assert _probe_timestamp(100.0, "10") == 10.0
+    assert _probe_timestamp(100.0, "1:30") == 90.0
+
+
+def test_probe_timestamp_clamps_override_beyond_duration():
+    assert _probe_timestamp(100.0, "9999") == 99.5
+
+
+def test_probe_timestamp_zero_duration_is_zero():
+    assert _probe_timestamp(0.0, None) == 0.0
+    assert _probe_timestamp(0.0, "5") == 0.0
+
+
+def test_probe_timestamp_short_duration_stays_in_range():
+    t = _probe_timestamp(10.0, None)
+    assert 0.0 <= t <= 9.5
+    assert t == 2.5
+
+
+def test_probe_timestamp_exactly_at_hi_clamp_is_not_reduced_further():
+    # hi = max(100.0 - 0.5, 0.0) = 99.5; a value exactly at hi must pass through
+    # unchanged (not further reduced by the clamp).
+    assert _probe_timestamp(100.0, "99.5") == 99.5
 
 
 def test_validate_slides_args_threshold_range():
@@ -150,6 +239,248 @@ def test_wipe_frames_dir_clears_inside_library_root(tmp_path, monkeypatch):
     assert list(frames.iterdir()) == []
 
 
+def test_emit_probe_frame_lines_prints_full_block(capsys):
+    _emit_probe_frame_lines(
+        Path("probe/0001_t00-03.jpg"), 2.6, 320, 240, Path("/lib/work"), "https://example.com/x"
+    )
+    out = capsys.readouterr().out
+    assert "=== probe frame ===" in out
+    assert "frame: probe" in out and "0001_t00-03.jpg" in out
+    # t=2.6 rounds to 3s (round(2.6) == 3), matching frames.format_filename's
+    # `round(t)` — NOT int(t), which would truncate to t=00:02 and drift from
+    # the actual frame filename above.
+    assert "timestamp: t=00:03" in out
+    assert "source_resolution: 320x240" in out
+    assert "library_dir: " in out and "work" in out
+    assert "next:" in out
+    assert (
+        'python3 watch.py "https://example.com/x" --slides --crop W:H:X:Y [...other flags]'
+        in out
+    )
+
+
+def test_emit_probe_frame_lines_mm_can_exceed_59(capsys):
+    # t=3725s -> 62:05 (round(3725) == 3725; divmod(3725, 60) == (62, 5)).
+    # MM may exceed 59 per house convention (same as frames.format_filename).
+    _emit_probe_frame_lines(
+        Path("probe/0001_t62-05.jpg"), 3725.0, 1920, 1080, Path("/lib/work"), "video.mp4"
+    )
+    out = capsys.readouterr().out
+    assert "timestamp: t=62:05" in out
+
+
+def test_run_probe_frame_writes_meta_and_probe_frame_no_manifest(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("scripts.library.LIBRARY_ROOT", tmp_path)
+
+    def fake_extract_frames(video, scenes, *, out_dir, native=False, **kwargs):
+        assert native is True
+        assert len(scenes) == 1
+        assert scenes[0].t == 3.0
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "0001_t00-03.jpg").write_bytes(b"fake-jpg")
+        return [{"index": 1, "t": 3.0, "path": "0001_t00-03.jpg", "kind": "probe"}]
+
+    monkeypatch.setattr("scripts.watch.frames_mod.extract_frames", fake_extract_frames)
+    monkeypatch.setattr("scripts.watch.slides_mod.probe_dimensions", lambda v: (320, 240))
+
+    work = tmp_path / "slug"
+    work.mkdir(parents=True)
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video")
+
+    meta = {
+        "source": "https://example.com/x",
+        "duration_s": 10.0,
+        "title": "Test video",
+        "is_url": True,
+        "source_hash": "abc123",
+    }
+    args = argparse.Namespace(probe_at="3")
+
+    rc = _run_probe_frame(video, meta, work, args)
+
+    assert rc == 0
+
+    meta_path = work / "meta.json"
+    assert meta_path.exists()
+    assert json.loads(meta_path.read_text()) == meta
+
+    assert not (work / "manifest.json").exists()
+
+    probe_dir = work / "probe"
+    probe_files = list(probe_dir.iterdir())
+    assert len(probe_files) == 1
+    assert probe_files[0].name == "0001_t00-03.jpg"
+
+    captured = capsys.readouterr()
+    out = captured.out
+    assert "=== probe frame ===" in out
+    assert "timestamp: t=00:03" in out
+    assert "source_resolution: 320x240" in out
+    assert "library_dir:" in out
+    assert "next:" in out
+    # probe_at=3 on a 10s video is NOT clamped — the stderr clamp advisory must
+    # stay silent. Pins the guard's false branch: a mutant that prints the
+    # advisory unconditionally (dropping the clamp-detection check) fails here.
+    assert "note:" not in captured.err
+
+
+def test_run_probe_frame_routes_through_probe_timestamp_clamp(tmp_path, monkeypatch, capsys):
+    # Proves _run_probe_frame calls _probe_timestamp (which clamps into
+    # [0, duration - 0.5]) rather than a bare _parse_ts. A mutant that swapped
+    # in _parse_ts would extract at t=9999 and fail the scenes[0].t assertion
+    # below, instead of the clamped t=9.5.
+    monkeypatch.setattr("scripts.library.LIBRARY_ROOT", tmp_path)
+
+    def fake_extract_frames(video, scenes, *, out_dir, native=False, **kwargs):
+        assert native is True
+        assert len(scenes) == 1
+        assert scenes[0].t == 9.5
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "0001_t00-10.jpg").write_bytes(b"fake-jpg")
+        return [{"index": 1, "t": 9.5, "path": "0001_t00-10.jpg", "kind": "probe"}]
+
+    monkeypatch.setattr("scripts.watch.frames_mod.extract_frames", fake_extract_frames)
+    monkeypatch.setattr("scripts.watch.slides_mod.probe_dimensions", lambda v: (320, 240))
+
+    work = tmp_path / "slug"
+    work.mkdir(parents=True)
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video")
+
+    meta = {
+        "source": "https://example.com/x",
+        "duration_s": 10.0,
+        "title": "Test video",
+        "is_url": True,
+        "source_hash": "abc123",
+    }
+    args = argparse.Namespace(probe_at="9999")
+
+    rc = _run_probe_frame(video, meta, work, args)
+
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "note: --probe-at 9999 clamped to t=9.5s (duration 10.0s)" in err
+
+
+def test_run_probe_frame_wipes_stale_frames_before_extracting(tmp_path, monkeypatch):
+    # Mutation this kills: deleting the _wipe_frames_dir(probe_dir) call in
+    # _run_probe_frame, which would leave a stale probe frame from a prior run
+    # (e.g. a different --probe-at) alongside the fresh one.
+    monkeypatch.setattr("scripts.library.LIBRARY_ROOT", tmp_path)
+
+    def fake_extract_frames(video, scenes, *, out_dir, native=False, **kwargs):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "0001_t00-03.jpg").write_bytes(b"fake-jpg")
+        return [{"index": 1, "t": 3.0, "path": "0001_t00-03.jpg", "kind": "probe"}]
+
+    monkeypatch.setattr("scripts.watch.frames_mod.extract_frames", fake_extract_frames)
+    monkeypatch.setattr("scripts.watch.slides_mod.probe_dimensions", lambda v: (320, 240))
+
+    work = tmp_path / "slug"
+    probe_dir = work / "probe"
+    probe_dir.mkdir(parents=True)
+    stale = probe_dir / "stale_0001_t00-99.jpg"
+    stale.write_bytes(b"stale-jpg")
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake-video")
+
+    meta = {
+        "source": "https://example.com/x",
+        "duration_s": 10.0,
+        "title": "Test video",
+        "is_url": True,
+        "source_hash": "abc123",
+    }
+    args = argparse.Namespace(probe_at="3")
+
+    rc = _run_probe_frame(video, meta, work, args)
+
+    assert rc == 0
+    remaining = list(probe_dir.iterdir())
+    assert not stale.exists()
+    assert [f.name for f in remaining] == ["0001_t00-03.jpg"]
+
+
+def _poison(msg):
+    def _raise(*args, **kwargs):
+        raise AssertionError(msg)
+    return _raise
+
+
+def test_main_probe_frame_dispatch_never_reaches_detect_or_transcribe(
+    tmp_path, monkeypatch, capsys
+):
+    # Deterministic (no subprocess/network) proof that `main()` short-circuits
+    # to `_run_probe_frame` and returns before Stage 3/4/5. Mutation this
+    # kills: removing the `if args.probe_frame: return _run_probe_frame(...)`
+    # branch — a fall-through would hit one of the poisoned stubs below and
+    # raise AssertionError instead of returning 0.
+    monkeypatch.setattr(lib, "LIBRARY_ROOT", tmp_path)
+
+    fake_source = tmp_path / "source.mp4"
+    fake_source.write_bytes(b"fake-video")
+
+    fake_meta = {
+        "title": "Test video",
+        "duration_s": 10.0,
+        "source": str(fake_source),
+        "is_url": False,
+        "source_hash": "deadbeef",
+        "focus_range_str": "",
+    }
+    monkeypatch.setattr(
+        watch.resolve_mod, "resolve_source", lambda *a, **kw: dict(fake_meta)
+    )
+
+    def fake_copy_local(src, out_dir, *, basename="video"):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dest = out_dir / f"{basename}.mp4"
+        dest.write_bytes(b"fake-video")
+        return dest
+
+    monkeypatch.setattr(watch.download_mod, "copy_local", fake_copy_local)
+
+    def fake_extract_frames(video, scenes, *, out_dir, native=False, **kwargs):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "0001_t00-03.jpg").write_bytes(b"fake-jpg")
+        return [{"index": 1, "t": 3.0, "path": "0001_t00-03.jpg", "kind": "probe"}]
+
+    monkeypatch.setattr(watch.frames_mod, "extract_frames", fake_extract_frames)
+    monkeypatch.setattr(watch.slides_mod, "probe_dimensions", lambda v: (320, 240))
+
+    # Poisoned: the probe path must never reach transcription or detection.
+    monkeypatch.setattr(
+        watch.transcribe_mod, "fetch_native_captions",
+        _poison("probe path must not transcribe"),
+    )
+    monkeypatch.setattr(
+        watch.transcribe_mod, "extract_audio_for_whisper",
+        _poison("probe path must not transcribe"),
+    )
+    monkeypatch.setattr(
+        watch.scenes_mod, "detect_scenes", _poison("probe path must not detect")
+    )
+    monkeypatch.setattr(
+        watch.slides_mod, "detect_slides_freeze", _poison("probe path must not detect")
+    )
+    monkeypatch.setattr(
+        watch.slides_mod, "detect_slides", _poison("probe path must not detect")
+    )
+
+    rc = watch.main([
+        str(fake_source), "--slides", "--probe-frame", "--probe-at", "3",
+        "--no-whisper", "--out-dir", str(tmp_path),
+    ])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "=== probe frame ===" in out
+    assert "source_resolution: 320x240" in out
+
+
 @pytest.mark.integration
 def test_watch_end_to_end_on_local_fixture(tmp_path):
     """`scripts/watch.py <fixture> --no-whisper --out-dir <tmp>` runs the full pipeline."""
@@ -214,6 +545,42 @@ def test_watch_slides_end_to_end_on_local_fixture(tmp_path):
     assert all(frame["path"].startswith("frames/") for frame in manifest["frames"])
     for frame in manifest["frames"]:
         assert (lib / frame["path"]).exists()
+
+
+@pytest.mark.integration
+def test_watch_probe_frame_end_to_end_on_local_fixture(tmp_path):
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "watch.py"),
+            str(FIXTURE),
+            "--slides",
+            "--probe-frame",
+            "--probe-at", "3",
+            "--no-whisper",
+            "--cam-corner", "none",
+            "--caption", "none",
+            "--out-dir", str(tmp_path),
+        ],
+        capture_output=True, text=True, encoding="utf-8", check=False, cwd=str(ROOT),
+    )
+    assert proc.returncode == 0, f"watch.py failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}"
+    assert "=== probe frame ===" in proc.stdout
+    assert "source_resolution:" in proc.stdout
+
+    library_dirs = list(tmp_path.glob("*"))
+    assert len(library_dirs) == 1, f"expected one library dir, got {library_dirs}"
+    lib = library_dirs[0]
+
+    probe_dir = lib / "probe"
+    probe_files = list(probe_dir.glob("*"))
+    assert len(probe_files) == 1, f"expected exactly one probe frame, got {probe_files}"
+
+    frames_dir = lib / "frames"
+    assert not frames_dir.exists() or not any(frames_dir.iterdir())
+
+    assert not (lib / "manifest.json").exists()
+    assert (lib / "meta.json").exists()
 
 
 def test_emit_slide_review_lines_prints_review_and_merged(capsys):

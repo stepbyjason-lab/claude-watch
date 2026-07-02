@@ -59,7 +59,7 @@ for every mode — see [Note quality](#note-quality).
   hash, so it tells apart monochrome text slides on white decks): near-identical frames are dropped, but
   borderline pairs are **kept and flagged**, not silently merged.
 - Downloads 720p and extracts at native resolution; `--hi-res` for tiny-text decks.
-- New flags: `--slides`, `--detect`, `--crop`, `--hold`, `--freeze-noise`, `--candidate-cap`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`, `--merge-gap`, `--merge-dist`.
+- New flags: `--slides`, `--detect`, `--crop`, `--hold`, `--freeze-noise`, `--candidate-cap`, `--cam-corner`, `--caption`, `--hi-res`, `--phash-dist`, `--merge-gap`, `--merge-dist`, `--probe-frame`, `--probe-at`.
 
 > **Detection mode (default `--detect freeze`).** `--slides` now captures one frame per
 > *held* (frozen) screen — a prepared slide is shown static for a few seconds, while a live
@@ -101,7 +101,7 @@ Run the suite with `python -m pytest -m "not network"`.
 
 Flags: `--start/--end`, `--max-frames`, `--resolution`, `--scene-threshold`, `--max-gap`, `--whisper local|groq|openai`, `--no-whisper`, `--out-dir`.
 
-Slides flags: `--slides`, `--detect freeze|scene` (default freeze), `--crop W:H:X:Y|auto`, `--hold SECONDS` (default 5), `--freeze-noise -50dB`, `--candidate-cap N` (default 800), `--prefer-light` + `--light-threshold N` (default 80), `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`, `--merge-gap S`/`--merge-dist N` (freeze time-aware merge of animation build-steps, defaults 15/11; either 0 disables; merges print as `merged:` lines).
+Slides flags: `--slides`, `--detect freeze|scene` (default freeze), `--crop W:H:X:Y|auto`, `--hold SECONDS` (default 5), `--freeze-noise -50dB`, `--candidate-cap N` (default 800), `--prefer-light` + `--light-threshold N` (default 80), `--cam-corner tr|tl|br|bl|none`, `--caption bottom|top|none`, `--hi-res`, `--phash-dist`, `--merge-gap S`/`--merge-dist N` (freeze time-aware merge of animation build-steps, defaults 15/11; either 0 disables; merges print as `merged:` lines), `--probe-frame` + `--probe-at TIMESTAMP` (download-only: extract one native-resolution frame + report source pixel dimensions, then exit — for measuring `--crop W:H:X:Y` before the full run; default probe timestamp is 25% into the video).
 
 > **`--prefer-light` (opt-in, freeze only).** After freeze capture, drops frames whose mean brightness is below `--light-threshold` (0–255, default 80) — a cheap way to discard dark IDE/terminal *demo* screens and cut downstream token cost further. Assumes light-background slides: **leave it off for dark-themed decks** (their slides would be dropped). It removes dark demos, not light-background ones — final slide selection still belongs to the notes step.
 
