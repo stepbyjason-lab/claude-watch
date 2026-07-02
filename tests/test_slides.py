@@ -20,6 +20,7 @@ from scripts.slides import (
     validate_freeze_noise,
     _freeze_periods,
     _read_pgm,
+    _surviving_audit_lines,
     _trim_high_motion_edges,
 )
 
@@ -919,6 +920,62 @@ def test_detect_slides_freeze_real_merge_end_to_end(tmp_path):
     assert out["merge_flagged"] == []
 
 
+def test_detect_slides_freeze_survivors_filter_drops_flagged_via_real_pipeline(tmp_path):
+    # R08 field bug, reproduced end-to-end through REAL phash_dedup + REAL
+    # time_aware_merge (not pre-fabricated tuples like the mocked tests above, and
+    # not the real_merge_end_to_end test above either — that one's first pair has
+    # dist 12 > flag_dist 10, so it never reaches phash_dedup's flag branch). Here
+    # the SAME pair of frames is both:
+    #   (a) flagged as a near-dup by real phash_dedup (drop_dist < dist <= flag_dist)
+    #   (b) folded away by real time_aware_merge (dist < merge_dist AND gap < merge_gap_s)
+    # so the (t=3.0, t=12.0, dist) line phash_dedup emits now references a frame
+    # (t=12.0) that no longer exists once time_aware_merge runs. Without R09's
+    # `_surviving_audit_lines` call, out["flagged"] would regress to
+    # [(3.0, 12.0, 7)] — a stale audit line pointing at a deleted frame.
+    periods = [(1.0, 4.0), (10.0, 4.0)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    # dist(0b0000000, 0b1111111) = popcount(0b1111111) = 7 (verified against the
+    # real dhash bit-decoding via _dhash_bits_to_gray_bytes, not assumed). With
+    # drop_dist=4, flag_dist=10, merge_dist=11: 4 < 7 <= 10 -> real phash_dedup
+    # FLAGS the pair (keeps both frames). Then dist 7 < merge_dist 11.
+    hashes_by_name = {"0001.jpg": 0b0000000, "0002.jpg": 0b1111111}
+
+    def fake_run(cmd, **kwargs):
+        image_path = cmd[cmd.index("-i") + 1]
+        bits = hashes_by_name[Path(image_path).name]
+        return MagicMock(returncode=0, stdout=_dhash_bits_to_gray_bytes(bits))
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.subprocess.run", side_effect=fake_run):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=4.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=15.0, merge_dist=11,
+        )
+    # scene t = period start + min(dur/2, 3.0): starts 1/10 (dur 4) -> t 3.0/12.0.
+    # gap = 12.0 - 3.0 = 9.0 (< merge_gap_s 15) and dist 7 < merge_dist 11 ->
+    # time_aware_merge folds frame2 (t=12.0) into frame1 (t=3.0).
+    assert [s["t"] for s in out["slides"]] == [3.0]
+    assert out["merged"] == [(3.0, 12.0, 7, 9.0)]
+    # The key R09 assertion: real phash_dedup produced flagged=[(3.0, 12.0, 7)],
+    # but real time_aware_merge then unlinked the t=12.0 frame, so the survivors
+    # filter must suppress the now-stale flagged line.
+    assert out["flagged"] == []
+    assert out["merge_flagged"] == []
+    remaining = {p.name for p in tmp_path.glob("*.jpg")}
+    kept_names = {Path(s["path"]).name for s in out["slides"]}
+    assert remaining == kept_names  # frame2's file was unlinked by the merge fold
+
+
 def test_detect_slides_freeze_applies_merge_and_unlinks_reindexes(tmp_path):
     # 3 kept-by-dedup frames at t=1,10,11 (all distinct enough to survive phash_dedup);
     # time_aware_merge then merges the t=10/t=11 pair (gap=1<15, dist close) into t=1's
@@ -934,8 +991,11 @@ def test_detect_slides_freeze_applies_merge_and_unlinks_reindexes(tmp_path):
         return recs
 
     # phash_dedup keeps all 3 (all far apart); time_aware_merge then merges the last
-    # pair (close in both time and hash).
-    fake_merged = [(10.0, 11.0, 3, 1.0)]
+    # pair (close in both time and hash). Real scene t = start + min(dur/2, 3.0), so
+    # periods (1.0,10.0,11.0) with dur=4.0 yield t=(3.0,12.0,13.0) — the anchor here
+    # (12.0) must match the 2nd record's real t for the R09 survivors filter to keep
+    # this merged line (it drops lines whose anchor isn't in the final slide set).
+    fake_merged = [(12.0, 13.0, 3, 1.0)]
     with patch("scripts.slides._freeze_periods", return_value=periods), \
          patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
@@ -971,7 +1031,11 @@ def test_detect_slides_freeze_surfaces_merge_flagged_on_result_dict(tmp_path):
             recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
         return recs
 
-    fake_flagged = [(1.0, 10.0, 11, 9.0)]
+    # Real scene t for periods (1.0,10.0) with dur=4.0 is (3.0,12.0) — both records
+    # here survive (time_aware_merge fake keeps `recs` unchanged), so a merge_flagged
+    # line naming those two real t values survives the R09 survivors filter (both
+    # sides present).
+    fake_flagged = [(3.0, 12.0, 11, 9.0)]
     with patch("scripts.slides._freeze_periods", return_value=periods), \
          patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
          patch("scripts.slides.phash_dedup", side_effect=lambda recs, **k: (recs, [])), \
@@ -1269,3 +1333,203 @@ def test_detect_slide_crop_none_when_overtrimmed(monkeypatch):
 
     monkeypatch.setattr(slides.subprocess, "run", fake_run)
     assert detect_slide_crop(Path("x.mp4"), 1920, 1080, samples=6, probe_w=pw) is None
+
+
+# ---- R09: audit lines filtered to surviving frames only --------------------
+
+def test_surviving_audit_lines_flagged_suppressed_when_one_side_missing():
+    flagged = [(1.0, 2.0, 5)]
+    kept, merged, merge_flagged = _surviving_audit_lines({1.0}, flagged, [], [])
+    assert kept == []
+    assert merged == []
+    assert merge_flagged == []
+
+
+def test_surviving_audit_lines_flagged_kept_when_both_survive():
+    flagged = [(1.0, 2.0, 5)]
+    kept, merged, merge_flagged = _surviving_audit_lines({1.0, 2.0}, flagged, [], [])
+    assert kept == [(1.0, 2.0, 5)]
+
+
+def test_surviving_audit_lines_merge_flagged_suppressed_when_one_side_missing():
+    merge_flagged = [(1.0, 2.0, 11, 9.0)]
+    _, _, kept_mf = _surviving_audit_lines({1.0}, [], [], merge_flagged)
+    assert kept_mf == []
+
+
+def test_surviving_audit_lines_merge_flagged_kept_when_both_survive():
+    merge_flagged = [(1.0, 2.0, 11, 9.0)]
+    _, _, kept_mf = _surviving_audit_lines({1.0, 2.0}, [], [], merge_flagged)
+    assert kept_mf == [(1.0, 2.0, 11, 9.0)]
+
+
+def test_surviving_audit_lines_merged_kept_when_anchor_survives_dropped_absent():
+    # merged's dropped_t is unlinked BY DESIGN — it must be ABSENT from surviving_ts
+    # and the line must still survive on the anchor alone. This pins the correct
+    # "anchor-only" rule and kills a mutant that filters merged on both timestamps
+    # (which would wrongly delete every merged line, since dropped_t is never present).
+    merged = [(1.0, 2.0, 3, 1.0)]
+    _, kept_merged, _ = _surviving_audit_lines({1.0}, [], merged, [])
+    assert kept_merged == [(1.0, 2.0, 3, 1.0)]
+
+
+def test_surviving_audit_lines_merged_suppressed_when_anchor_missing():
+    merged = [(1.0, 2.0, 3, 1.0)]
+    _, kept_merged, _ = _surviving_audit_lines(set(), [], merged, [])
+    assert kept_merged == []
+
+
+def test_surviving_audit_lines_empty_inputs_yield_empty_outputs():
+    assert _surviving_audit_lines(set(), [], [], []) == ([], [], [])
+
+
+def test_surviving_audit_lines_mixed_survivors_and_casualties():
+    surviving = {1.0, 2.0, 5.0}
+    flagged = [(1.0, 2.0, 5), (2.0, 3.0, 6)]  # 2nd pair: 3.0 missing -> suppressed
+    merged = [(2.0, 3.5, 2, 1.5), (9.0, 9.5, 2, 0.5)]  # 2nd anchor 9.0 missing -> suppressed
+    merge_flagged = [(1.0, 5.0, 11, 4.0), (5.0, 6.0, 11, 1.0)]  # 2nd: 6.0 missing
+    kept_f, kept_m, kept_mf = _surviving_audit_lines(surviving, flagged, merged, merge_flagged)
+    assert kept_f == [(1.0, 2.0, 5)]
+    assert kept_m == [(2.0, 3.5, 2, 1.5)]
+    assert kept_mf == [(1.0, 5.0, 11, 4.0)]
+
+
+def test_detect_slides_freeze_survivors_filter_drops_stale_flagged_after_merge(tmp_path):
+    # Deterministic end-to-end pin: phash_dedup flags a near-dup pair, then
+    # time_aware_merge folds the later member away (merging it into the first
+    # record). The near-dup line referencing the merged-away frame must be
+    # suppressed from result["flagged"] because one of its two frames no longer
+    # survives, even though the flagged pair itself was never re-evaluated by the
+    # merge pass. Real scene t = start + min(dur/2, 3.0); periods (1.0,10.0,20.0)
+    # with dur=4.0 -> t=(3.0,12.0,22.0).
+    periods = [(1.0, 4.0), (10.0, 4.0), (20.0, 4.0)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    fake_flagged = [(12.0, 22.0, 8)]  # near-dup pair kept by dedup
+    fake_merged = [(3.0, 22.0, 3, 19.0)]  # merge later folds t=22 into t=3
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup",
+               side_effect=lambda recs, **k: (recs, fake_flagged)), \
+         patch("scripts.slides.time_aware_merge",
+               side_effect=lambda recs, **k: ([recs[0], recs[1]], fake_merged, [])):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=4.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=15.0, merge_dist=11,
+        )
+    # t=22 was merged away; the stale near-dup line referencing it must be gone.
+    assert out["flagged"] == []
+    assert out["merged"] == fake_merged  # anchor t=3 survives -> drop notice kept
+    assert [s["t"] for s in out["slides"]] == [3.0, 12.0]
+
+
+def test_detect_slides_freeze_survivors_filter_prefer_light_drops_referenced_frame(tmp_path):
+    # A near-dup/merge-threshold/merged line can reference a frame that survives
+    # dedup+merge but is then dropped by --prefer-light for being too dark. All
+    # lines referencing that frame must be suppressed. Real scene t = start +
+    # min(dur/2, 3.0); periods (1.0,10.0,20.0) with dur=4.0 -> t=(3.0,12.0,22.0).
+    periods = [(1.0, 4.0), (10.0, 4.0), (20.0, 4.0)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}_t{int(sc.t):02d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    fake_flagged = [(12.0, 22.0, 8)]
+    fake_merge_flagged = [(3.0, 12.0, 11, 9.0)]
+    luma = {"0001_t03.jpg": 200, "0002_t12.jpg": 200, "0003_t22.jpg": 10}  # t=22 is dark
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup",
+               side_effect=lambda recs, **k: (recs, fake_flagged)), \
+         patch("scripts.slides.time_aware_merge",
+               side_effect=lambda recs, **k: (recs, [], fake_merge_flagged)), \
+         patch("scripts.slides.mean_luma", side_effect=lambda p: luma[Path(p).name]):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=4.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=15.0, merge_dist=11,
+            prefer_light=True, light_threshold=80.0,
+        )
+    assert [s["t"] for s in out["slides"]] == [3.0, 12.0]  # t=22 dropped (dark)
+    assert out["flagged"] == []  # near-dup line referenced dropped t=22 -> suppressed
+    assert out["merge_flagged"] == fake_merge_flagged  # both t=3,t=12 survive -> kept
+
+
+def test_detect_slides_freeze_survivors_filter_noop_when_merge_and_prefer_light_off(tmp_path):
+    # merge disabled (merge_gap_s=0) + prefer-light off: no frame is ever unlinked
+    # after phash_dedup, so the filter must be a pure no-op (byte-identical to R05).
+    # Real scene t = start + min(dur/2, 3.0) (or hold/2 for the open-ended tail
+    # period): periods (10.0,30.0,50.0/None) with dur=6.0, hold=5.0 -> t=(13.0,33.0,52.5).
+    periods = [(10.0, 6.0), (30.0, 6.0), (50.0, None)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    fake_flagged = [(13.0, 33.0, 9)]  # both frames survive (merge is off, no drops)
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup",
+               side_effect=lambda recs, **k: (recs, fake_flagged)):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=5.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=0,  # disabled
+            prefer_light=False,
+        )
+    assert out["flagged"] == fake_flagged  # unchanged — no-op path
+    assert out["merged"] == []
+    assert out["merge_flagged"] == []
+
+
+def test_detect_slides_freeze_survivors_filter_all_survive_passthrough(tmp_path):
+    # When every referenced frame survives merge + prefer-light, all three lists
+    # pass through unchanged. Real scene t = start + min(dur/2, 3.0); periods
+    # (1.0,10.0,20.0) with dur=4.0 -> t=(3.0,12.0,22.0).
+    periods = [(1.0, 4.0), (10.0, 4.0), (20.0, 4.0)]
+
+    def fake_extract(video, scenes, *, out_dir, width_px, native, crop_vf):
+        recs = []
+        for i, sc in enumerate(scenes, start=1):
+            name = f"{i:04d}.jpg"
+            (out_dir / name).write_bytes(b"x")
+            recs.append({"index": i, "t": sc.t, "path": name, "kind": sc.kind})
+        return recs
+
+    fake_flagged = [(3.0, 12.0, 8)]
+    fake_merge_flagged = [(12.0, 22.0, 11, 10.0)]
+
+    with patch("scripts.slides._freeze_periods", return_value=periods), \
+         patch("scripts.slides.frames_mod.extract_frames", side_effect=fake_extract), \
+         patch("scripts.slides.phash_dedup",
+               side_effect=lambda recs, **k: (recs, fake_flagged)), \
+         patch("scripts.slides.time_aware_merge",
+               side_effect=lambda recs, **k: (recs, [], fake_merge_flagged)):
+        out = detect_slides_freeze(
+            Path("v.mp4"), out_dir=tmp_path, crop="100:100:0:0",
+            hold=4.0, drop_dist=4, flag_dist=10, width_px=1280, candidate_cap=800,
+            merge_gap_s=15.0, merge_dist=11,
+        )
+    assert [s["t"] for s in out["slides"]] == [3.0, 12.0, 22.0]  # nothing dropped
+    assert out["flagged"] == fake_flagged
+    assert out["merged"] == []
+    assert out["merge_flagged"] == fake_merge_flagged

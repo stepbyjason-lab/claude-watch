@@ -678,6 +678,42 @@ def mean_luma(image_path: str | Path) -> int:
     return raw[0]
 
 
+def _surviving_audit_lines(
+    surviving_ts: set[float],
+    flagged: list[tuple[float, float, int]],
+    merged: list[tuple[float, float, int, float]],
+    merge_flagged: list[tuple[float, float, int, float]],
+) -> tuple[
+    list[tuple[float, float, int]],
+    list[tuple[float, float, int, float]],
+    list[tuple[float, float, int, float]],
+]:
+    """Drop audit lines that reference frames no longer on disk / in the manifest.
+
+    flagged (near-dup) and merge_flagged (merge-threshold) direct the reader to
+    OPEN BOTH frames, so a line survives only if BOTH timestamps are in
+    surviving_ts. merged is a DROP NOTICE — its dropped_t is unlinked by design,
+    so it survives if its anchor prev_kept_t is still present.
+
+    Frames can vanish after the audit lists are built: time_aware_merge folds
+    away a frame that phash_dedup had flagged as a borderline near-dup (a near-dup
+    is hash-close, so it overlaps the merge candidates), and --prefer-light drops
+    dark frames post-merge. Without this filter a review line can point at a
+    deleted frame — surfaced in the field on the R08 forum clip.
+    """
+    surviving_flagged = [
+        (ta, tb, d) for (ta, tb, d) in flagged if ta in surviving_ts and tb in surviving_ts
+    ]
+    surviving_merge_flagged = [
+        (ta, tb, d, g) for (ta, tb, d, g) in merge_flagged
+        if ta in surviving_ts and tb in surviving_ts
+    ]
+    surviving_merged = [
+        (pt, dt, d, g) for (pt, dt, d, g) in merged if pt in surviving_ts
+    ]
+    return surviving_flagged, surviving_merged, surviving_merge_flagged
+
+
 def detect_slides_freeze(
     video: Path,
     *,
@@ -830,6 +866,15 @@ def detect_slides_freeze(
                 RuntimeWarning, stacklevel=2,
             )
         slides = bright
+
+    # Re-validate the audit lists against the FINAL slide set: time_aware_merge (and,
+    # if enabled, --prefer-light above) can unlink a frame that flagged/merged/
+    # merge_flagged still references, leaving a stale line pointing at a deleted
+    # frame — see `_surviving_audit_lines` docstring for the R08 field evidence.
+    surviving_ts = {s["t"] for s in slides}
+    flagged, merged, merge_flagged = _surviving_audit_lines(
+        surviving_ts, flagged, merged, merge_flagged
+    )
 
     return {
         "slides": slides,

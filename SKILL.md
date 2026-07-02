@@ -135,6 +135,8 @@ The stdout may print `review: near-dup t=A ~ t=B (dist D)` lines. These are bord
 
 The stdout may also print `review: merge-threshold t=A ~ t=B (dist D, gap Gs)` lines — pairs that landed *exactly* on `--merge-dist` and were preserved rather than folded by the time-aware merge pass (the most fragile call it makes). **Read both frames of the pair.** If they're the same screen's build/scroll step (a bullet appearing, a panel scrolling), treat it like a near-dup: fold it into a single evidence entry with a `ledger` disposition in the coverage ledger. If they're genuinely distinct slides, treat both as real content — cover each on its own.
 
+Every `review:`/`merged:` line references only frames still present in the output — a line whose frame was folded away by the time-aware merge or dropped by `--prefer-light` is suppressed, so you never chase a missing frame.
+
 ## Notes template (concept-first study notes contract)
 
 The default output is **not** a scene-by-scene screen log. Read every frame and transcript segment, then reorganize the video into a study document. The prose should teach the core thesis and concepts; screenshots should appear inline where they prove, illustrate, or clarify the idea.
